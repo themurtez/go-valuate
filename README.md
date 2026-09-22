@@ -43,13 +43,15 @@ capital, growth/volatility, etc.) are implemented in `financial/metrics`;
 explicit normalization adjustments and the normalized EBITDA/SDE bridges
 built from them are implemented in `financial/adjustments`; selecting a
 single maintainable-earnings figure across historical periods is
-implemented in `financial/earnings` — see below for all five. Valuation
-formulas (SDE/EBITDA multiples, DCF, adjusted net asset value, etc.),
-AI/LLM-assisted or statistical classification, AI-assisted extraction,
-PDF/XLSX/CSV parsing, and persistence are all still explicitly **out of
-scope for this repository** at this stage. They are expected to be built as
-later modules, or in the consuming application, on top of the types and
-packages defined here — see
+implemented in `financial/earnings`; the individual valuation methods
+themselves (SDE multiple, EBITDA multiple, capitalization of earnings, DCF,
+adjusted net asset value) are implemented in `valuation` and its
+per-method subpackages — see below for all six. Method applicability
+rules, a multi-method consensus/weighting engine, sensitivity analysis,
+reporting/UI, AI/LLM assistance, a database, and PDF/document parsing are
+all still explicitly **out of scope for this repository** at this stage.
+They are expected to be built as later modules, or in the consuming
+application, on top of the types and packages defined here — see
 [Recommended next module](#recommended-next-module).
 
 ## Package boundaries
@@ -62,6 +64,12 @@ go-valuate/
   financial/metrics/         centralized derived-metrics engine (EBITDA, SDE, trends, ...)
   financial/adjustments/     explicit normalization adjustments -> normalized EBITDA/SDE bridges
   financial/earnings/        maintainable-earnings selection across historical periods
+  valuation/                 common valuation result envelope (value types, bridge, issues)
+  valuation/sde/              SDE multiple method
+  valuation/ebitda/           EBITDA multiple method
+  valuation/capitalization/   capitalization of earnings method
+  valuation/dcf/               discounted cash flow method
+  valuation/netassets/         adjusted net asset value method
   settings/                  generic hierarchical settings resolver
   fixtures/                  example JSON matching the Go types, used by tests
                              as living documentation
@@ -802,6 +810,377 @@ for all four business archetypes' EBITDA series run through
 `trend_adjusted`, including a case that appends a synthetic YTD period to
 confirm it's excluded rather than blended into the fiscal-year average.
 
+### `valuation`
+
+Implements the individual valuation methods themselves: SDE multiple,
+EBITDA multiple, capitalization of earnings, discounted cash flow, and
+adjusted net asset value — each as its own independently testable,
+strongly-typed subpackage (`valuation/sde`, `valuation/ebitda`,
+`valuation/capitalization`, `valuation/dcf`, `valuation/netassets`) sharing
+one common result envelope defined in `valuation` itself.
+
+None of these packages compute EBITDA/SDE, select a multiple or discount
+rate, or forecast cash flows — they consume already-determined figures
+(typically `financial/metrics.Snapshot` values, a `financial/adjustments`
+normalized bridge, or a `financial/earnings.Result`) and a caller-selected
+assumption (a multiple, a capitalization rate, a discount rate, explicit
+forecast cash flows, explicit fair-value asset/liability figures) and
+combine them into a single defensible value with a full calculation trace.
+Every `Calculate` function is pure: no I/O, no mutation of its inputs, and
+— consistent with every other package in this repository — no Go `error`
+return; invalidity is always communicated through `Result.Available` plus
+structured `Result.Errors`/`Result.Warnings`, mirroring
+`financial/metrics.MetricValue` and `financial/earnings.Result`'s
+established convention.
+
+#### Method codes and versions
+
+| Method | `Code` | Package |
+|---|---|---|
+| SDE Multiple | `SDE_MULTIPLE` | `valuation/sde` |
+| EBITDA Multiple | `EBITDA_MULTIPLE` | `valuation/ebitda` |
+| Capitalization of Earnings | `CAPITALIZATION_OF_EARNINGS` | `valuation/capitalization` |
+| Discounted Cash Flow | `DCF` | `valuation/dcf` |
+| Adjusted Net Asset Value | `ADJUSTED_NET_ASSET_VALUE` | `valuation/netassets` |
+
+Every method also exports a `Version` constant (currently `"1.0.0"` for
+all five), echoed on every `Result` as `MethodVersion`. **Method versioning
+is mandatory** because the main application is expected to persist
+historical valuations: a `Result` computed today must remain
+self-describing about exactly which calculation logic produced it, even
+after this package's formulas or validation rules evolve later. Bump a
+method's `Version` whenever its formula, validation rules, or output shape
+change in a way that could make an old `Result` not reproduce identically
+under the new code.
+
+#### Common result envelope
+
+Every method's `Result` (see each subpackage's `Input`/`Result` types)
+independently defines its own strongly-typed `Input` — deliberately not a
+single generic input shared across methods, since an SDE multiple's inputs
+share almost nothing in shape with a DCF's forecast-period list, and
+forcing them into one generic type would mean either a bag of
+mostly-unused fields or a loss of compile-time type safety for no benefit.
+What every `Result` *does* share, via the `valuation` package's types, is:
+
+- **`Method` / `MethodVersion`** — the method's stable `valuation.Code` and
+  the `Version` it ran under.
+- **`ValueType`** — `enterprise_value`, `equity_value`, or `asset_value`
+  (`valuation.ValueTypeEnterprise`/`Equity`/`Asset`) — see
+  [Enterprise value vs. equity value](#enterprise-value-vs-equity-value)
+  below. Never mixed silently: a method's headline numeric field name
+  always matches its `ValueType` (`EnterpriseValue`, `EquityValue`, or
+  `AdjustedNetAssetValue`).
+- **`Input`** — the exact input `Calculate` was given, echoed back so a
+  `Result` is self-contained and reproducible without the caller
+  separately retaining its own copy.
+- **`Available` + the headline value field** — `false` only when the
+  method could not produce a defensible number at all (see
+  [Validation](#validation) below); the headline field is always `0` when
+  `Available` is `false`.
+- **`Steps []valuation.Step`** — the full calculation trace, in the order
+  computed: every labeled intermediate and final figure a reviewer would
+  want to see, never collapsed to just the headline number.
+- **`Warnings []valuation.Issue` / `Errors []valuation.Issue`** — see
+  [Validation](#validation).
+
+```go
+type Step struct {
+    Label  string  // e.g. "Enterprise Value = Maintainable EBITDA x Multiple"
+    Value  float64
+    Detail string  // e.g. "500000 x 4"
+}
+```
+
+#### Enterprise value vs. equity value
+
+Methods never mix value types silently. Each method's doc comment states
+exactly which `ValueType` it produces and why:
+
+| Method | Native `ValueType` | Reasoning |
+|---|---|---|
+| SDE Multiple | `equity_value` | SDE already includes the return to a single working owner, which small-business valuation practice treats as pricing the owner's equity directly, not a capital-structure-neutral enterprise. |
+| EBITDA Multiple | `enterprise_value` | EBITDA is capital-structure-neutral; an EBITDA multiple conventionally prices the whole cash-free/debt-free operating business. |
+| Capitalization of Earnings | `equity_value` | Conventionally applied directly to an earnings stream already understood to belong to equity holders (e.g. SDE or owner net income). |
+| DCF | `enterprise_value` | Discounts unlevered free cash flow to the firm at a WACC-style rate — the standard FCFF-to-Enterprise-Value convention. Levered FCFE-to-equity discounting is not supported (see `valuation/dcf`'s package doc comment on why mixing the two conventions in one `Input` is deliberately avoided). |
+| Adjusted Net Asset Value | `asset_value` | Distinct from both: an itemized adjusted-assets-minus-adjusted-liabilities calculation, not necessarily interchangeable with a going-concern equity value from an earnings-based method. |
+
+**The bridge.** Where an enterprise-value method (`valuation/ebitda`,
+`valuation/dcf`) needs conversion to an equity value — or, unusually, where
+a caller wants one applied on top of an already-equity-value method
+(`valuation/sde` also exposes this, in case a caller's convention wants
+it) — every method uses the exact same explicit formula, returned as its
+own inspectable `valuation.Bridge`, never folded invisibly into the
+headline number:
+
+```
+Equity Value = Enterprise Value + Excess Cash - Total Debt
+```
+
+```go
+type Bridge struct {
+    Available       bool
+    EnterpriseValue float64
+    ExcessCash      float64
+    TotalDebt       float64
+    DebtComponents  []Component // e.g. Short-Term Debt, Long-Term Debt, Other Debt
+    EquityValue     float64
+}
+```
+
+The bridge is opt-in per call (`Input.EquityBridge.Requested`) — a method
+whose native result is already an enterprise or equity value remains fully
+valid on its own; a caller only pays for the bridge's extra inputs
+(`ExcessCash`, `ShortTermDebt`, `LongTermDebt`, `OtherDebt`) when it
+actually wants one. `Result.Bridge.Available` is `false` whenever no
+bridge was requested, distinct from a bridge that was requested and
+computed with every field at its legitimate zero value (e.g. a debt-free,
+cash-free business).
+
+#### `valuation/sde` — SDE Multiple
+
+```
+Equity Value = Maintainable SDE x Multiple
+```
+
+| | |
+|---|---|
+| Code / Version | `SDE_MULTIPLE` / `1.0.0` |
+| Required inputs | `MaintainableSDE`, `Multiple` |
+| Output value type | `equity_value` |
+| Optional | `EquityBridge` (see above) |
+
+Validation: `Multiple` must be finite and `> 0` (`IssueNonPositiveMultiple`,
+blocking) — a multiple of zero or less has no defensible interpretation.
+`MaintainableSDE` must be finite, but a **zero or negative** value is
+**not** a blocking error: it is a real, calculable outcome (a business with
+no discretionary earnings is validly priced at zero-or-below by a pure
+multiple method), surfaced as a non-blocking `IssueNonPositiveSDE`
+warning. `Calculate` never clamps a negative result up to zero — see
+`sde_test.go`'s `TestCalculate_NegativeSDE`, which asserts the exact
+negative product is returned.
+
+```go
+res := sde.Calculate(sde.Input{MaintainableSDE: 218800, Multiple: 2.5})
+// res.EquityValue == 547000, res.Available == true
+```
+
+#### `valuation/ebitda` — EBITDA Multiple
+
+```
+Enterprise Value = Maintainable EBITDA x Multiple
+Equity Value      = Enterprise Value + Excess Cash - Total Debt   (if EquityBridge requested)
+```
+
+| | |
+|---|---|
+| Code / Version | `EBITDA_MULTIPLE` / `1.0.0` |
+| Required inputs | `MaintainableEBITDA`, `Multiple` |
+| Output value type | `enterprise_value` (native); `equity_value` via `Bridge.EquityValue` when requested |
+| Optional | `EquityBridge`: `ExcessCash`, `ShortTermDebt`, `LongTermDebt`, `OtherDebt` |
+
+Validation mirrors `valuation/sde`: `Multiple` must be finite and `> 0`
+(blocking `IssueNonPositiveMultiple`); a zero or negative
+`MaintainableEBITDA` is a non-blocking `IssueNonPositiveEBITDA` warning,
+never clamped. Every `EquityBridge` field is independently checked for
+finiteness when a bridge is requested, and the bridge is never computed at
+all if the base calculation itself is invalid.
+
+```go
+res := ebitda.Calculate(ebitda.Input{
+    MaintainableEBITDA: 126800, Multiple: 3.5,
+    EquityBridge: ebitda.EquityBridgeInput{
+        Requested: true, ExcessCash: 63000, ShortTermDebt: 8000, LongTermDebt: 47000,
+    },
+})
+// res.EnterpriseValue == 443800
+// res.Bridge.EquityValue == 443800 + 63000 - 55000 == 451800
+```
+
+#### `valuation/capitalization` — Capitalization of Earnings
+
+```
+Equity Value = Maintainable Earnings / Capitalization Rate
+```
+
+| | |
+|---|---|
+| Code / Version | `CAPITALIZATION_OF_EARNINGS` / `1.0.0` |
+| Required inputs | `MaintainableEarnings`, `CapitalizationRate` (decimal, e.g. `0.20` = 20%) |
+| Output value type | `equity_value` (always — see the package doc comment on why this holds regardless of whether the caller's earnings base is SDE-like or EBIT-like) |
+
+This package **never invents a capitalization rate** — no build-up-method
+helper, no default. Validation: `CapitalizationRate` must be finite and
+`> 0` (blocking `IssueNonPositiveCapRate`) — a zero rate is an undefined
+division, and a negative rate would invert the formula's direction under
+an unstated alternate convention this package refuses to guess at. A zero
+or negative `MaintainableEarnings` is a non-blocking `IssueNonPositiveEarnings`
+warning, never clamped.
+
+```go
+res := capitalization.Calculate(capitalization.Input{
+    MaintainableEarnings: 218800, CapitalizationRate: 0.30,
+})
+// res.EquityValue == 729333.33...
+```
+
+#### `valuation/dcf` — Discounted Cash Flow
+
+```
+PV(period i)    = FCF(i) / (1 + discount_rate)^i
+FCF(n+1)        = FCF(n) x (1 + terminal_growth_rate)
+Terminal Value  = FCF(n+1) / (discount_rate - terminal_growth_rate)
+Enterprise Value = sum(PV(period i)) + Terminal Value / (1 + discount_rate)^n
+Equity Value     = Enterprise Value + Excess Cash - Total Debt   (if EquityBridge requested)
+```
+
+| | |
+|---|---|
+| Code / Version | `DCF` / `1.0.0` |
+| Required inputs | `ForecastPeriods []ForecastPeriod` (>= 1, caller-supplied, chronological), `DiscountRate`, `TerminalGrowthRate` |
+| Output value type | `enterprise_value` (native); `equity_value` via `Bridge.EquityValue` when requested |
+| Optional | `MidYearConvention` (discount exponent `i-0.5` instead of `i`), `EquityBridge` |
+
+**This package generates no forecasts.** Every `ForecastPeriod.FreeCashFlow`
+is caller-supplied; `Calculate` only discounts, sums, and computes the
+Gordon Growth terminal value from the figures it is given —
+`IssueNoForecastPeriods` blocks an empty forecast outright rather than
+inventing one.
+
+Validation: `DiscountRate` must be finite and `> 0`
+(`IssueNonPositiveDiscountRate`, blocking); **`DiscountRate` must be
+strictly greater than `TerminalGrowthRate`**
+(`IssueDiscountRateNotAboveTerminalGrowth`, blocking) — at or below zero,
+Gordon Growth's denominator implies a business growing as fast as or
+faster than it is discounted, which is not a large-but-real number, it is
+economically undefined. A zero/negative forecast cash flow —
+**including a negative terminal-year cash flow**, which propagates
+straight through to a negative terminal value — is **not** blocking: both
+are reported as non-blocking warnings (`IssueNegativeForecastCashFlow`,
+`IssueNegativeTerminalCashFlow`) and never clamped.
+
+`Result` never hides a calculation step: every `ProjectedPeriod`
+(cash flow, discount factor, present value), `SumOfPresentValues`,
+`TerminalYearCashFlow`, `TerminalCashFlow` (`FCF(n+1)`), `TerminalValue`,
+`TerminalValueDiscountFactor`, and `TerminalValuePresentValue` are all
+independently exposed fields, not folded into `EnterpriseValue` alone.
+
+```go
+res := dcf.Calculate(dcf.Input{
+    ForecastPeriods: []dcf.ForecastPeriod{
+        {Period: "2026", FreeCashFlow: 130000},
+        {Period: "2027", FreeCashFlow: 140000},
+        {Period: "2028", FreeCashFlow: 150000},
+    },
+    DiscountRate: 0.22, TerminalGrowthRate: 0.03,
+})
+// res.TerminalValue == 154500 / (0.22 - 0.03) == 813157.89...
+// res.EnterpriseValue == res.SumOfPresentValues + res.TerminalValuePresentValue
+```
+
+#### `valuation/netassets` — Adjusted Net Asset Value
+
+```
+Adjusted Net Asset Value = Total Adjusted Assets - Total Adjusted Liabilities
+```
+
+| | |
+|---|---|
+| Code / Version | `ADJUSTED_NET_ASSET_VALUE` / `1.0.0` |
+| Required inputs | `Assets []AssetItem` (>= 1, non-empty) |
+| Optional inputs | `Liabilities []LiabilityItem` (may be empty — a debt-free, liability-free business is possible) |
+| Output value type | `asset_value` (never `equity_value` — see below) |
+
+This package **never assumes book value equals fair market value.** Every
+`AssetItem`/`LiabilityItem.Amount` is a caller-supplied fair/adjusted
+value; this package has no idea whether a given `Amount` is a raw book
+figure carried through unchanged or a genuine fair-value override — that
+distinction is made explicit per item via `IsOverride` (`true` marks an
+item as an explicit fair-value override that differs from reported book
+value, e.g. a fixed asset revalued via appraisal), purely for
+traceability. A caller that wants to start from book values (e.g.
+`metrics.Snapshot.TangibleAssetValue`) and apply no further adjustment
+does so explicitly — that is a legitimate, but distinct, choice this field
+makes visible rather than leaving a reader to guess whether an adjustment
+happened.
+
+Validation: `Assets` must be non-empty (`IssueNoAssets`, blocking) — a
+net asset value with *no* assets at all is invalid input, as opposed to
+assets that are present but sum to zero (a fully written-down asset base),
+which is a valid, calculable `0`. Every item's `Amount` must be finite. A
+negative item `Amount` is a non-blocking `IssueNegativeItemAmount` warning
+(unusual, e.g. a write-down override, but not rejected). **Liabilities
+exceeding assets is not a blocking error** — a negative net asset value
+for an insolvent or heavily-levered business is a real, calculable outcome
+(`IssueLiabilitiesExceedAssets`, warning, never clamped to zero).
+
+`Result.AssetComponents`/`LiabilityComponents` itemize every contributing
+line, in input order, so the total is never an opaque number.
+
+```go
+res := netassets.Calculate(netassets.Input{
+    Assets: []netassets.AssetItem{
+        {Label: "Cash", Amount: 238000},
+        {Label: "Fixed Assets (net book value)", Amount: 1595000},
+        {Label: "Fixed Assets (appraisal fair-value adjustment)", Amount: 405000, IsOverride: true,
+            Notes: "independent appraisal values the facility 405,000 above depreciated book value"},
+    },
+    Liabilities: []netassets.LiabilityItem{
+        {Label: "Long-Term Debt", Amount: 825000},
+    },
+})
+// res.ValueType == valuation.ValueTypeAsset
+// res.AdjustedNetAssetValue == (238000+1595000+405000) - 825000 == 1413000
+```
+
+Net asset value is deliberately **not** reconciled or compared against an
+earnings-based method's equity value here — see
+[Recommended next module](#recommended-next-module) for why that
+comparison is left to a future consensus module.
+
+#### Validation
+
+Every method follows the same two-tier convention, using the shared
+`valuation.IssueSeverity`/`valuation.Issue` types (`valuation.SeverityError`
+blocks the result; `valuation.SeverityWarning` does not):
+
+- **Blocking (`Result.Available == false`, headline value `0`):** a
+  non-finite numeric input anywhere in `Input` (including bridge/DCF
+  sub-fields), a non-positive multiple/capitalization-rate/discount-rate,
+  `DiscountRate <= TerminalGrowthRate`, no DCF forecast periods, or no NAV
+  assets. **No method ever panics on bad financial input** — every one of
+  these paths returns a normal `Result` with `Errors` populated.
+- **Non-blocking (`Result.Available == true`, `Warnings` populated):** a
+  zero/negative maintainable SDE/EBITDA/earnings, a zero/negative forecast
+  or terminal-year DCF cash flow, a negative NAV item amount, or
+  liabilities exceeding assets. These are real, calculable — if
+  concerning — outcomes. **No method silently clamps a negative or
+  zero-derived result up to a "normal-looking" positive number** — see
+  each package's `_test.go` for a test asserting the exact (negative)
+  value is returned rather than zero.
+
+`valuation.HasErrors(issues)`, `valuation.Errors(issues)`, and
+`valuation.Warnings(issues)` are shared helpers for filtering a mixed
+`[]valuation.Issue` slice, mirroring
+`financial/adjustments.HasErrors`'s role for that package's `Issue` type.
+
+#### Golden fixtures
+
+[`fixtures/valuation_by_business_type.json`](fixtures/valuation_by_business_type.json)
+holds each of the same four business archetypes' (HVAC, agency,
+manufacturer, SaaS growth company) method assumptions — SDE/EBITDA
+multiples, a capitalization rate, a DCF forecast with discount/terminal
+growth rates, and itemized adjusted net asset value inputs (including the
+manufacturer's appraisal-override fixed-asset item) — used by every method
+package's own `fixtures_test.go`. Each of those tests derives the
+archetype's maintainable SDE/EBITDA **live** from
+`financial/metrics.Calculate` over the corresponding
+`fixtures/normalized_<archetype>_multi_year.json` 2025 snapshot (the same
+pattern `financial/adjustments/fixtures_test.go` uses) rather than
+duplicating that figure in the valuation fixture, so expected outputs are
+computed independently in the tests themselves and can never silently
+drift from either fixture file.
+
 ### `settings`
 
 A generic four-scope settings resolver:
@@ -1004,12 +1383,16 @@ The expected path is:
    an internal shared module.
 2. The larger application supplies everything this repository deliberately
    omits: persistence (database-backed storage for aliases/rules per
-   account/client/valuation and for `Settings`, snapshotting `Resolution`
-   and classification `Result`s), HTTP handlers, auth, multi-tenancy,
-   document parsing (PDF/XLSX/CSV/QuickBooks), and actual valuation formulas
-   built on top of `FinancialDataset` and a resolved `Resolution`. It may
-   also eventually supply a statistical or AI/LLM-based classifier that
-   implements the same `[]RawLineItem` + config → `[]Result` boundary
+   account/client/valuation and for `Settings`, snapshotting `Resolution`,
+   classification `Result`s, and `valuation.*` method `Result`s — see
+   [Method versioning](#method-codes-and-versions) for why every method
+   result is version-stamped specifically for this), HTTP handlers, auth,
+   multi-tenancy, document parsing (PDF/XLSX/CSV/QuickBooks), and the
+   higher-level valuation logic layered on top of the individual methods
+   (which methods apply to a given business, a multi-method consensus
+   value, sensitivity analysis, report rendering). It may also eventually
+   supply a statistical or AI/LLM-based classifier that implements the
+   same `[]RawLineItem` + config → `[]Result` boundary
    `classification.Classify` implements today.
 3. Because every exported function here is a pure function over
    JSON-compatible Go structs, integration is expected to be closer to
@@ -1038,20 +1421,46 @@ go vet ./...
 ## Recommended next module
 
 With `financial`, `financial/classification`, `financial/reconciliation`,
-`financial/metrics`, `financial/adjustments`, `financial/earnings`, and
-`settings` all in place, the next natural addition is a **valuation
-formulas** package (e.g. `valuation/`) that consumes a
-`financial.FinancialDataset`, an `adjustments.Result` (normalized
-EBITDA/SDE), an `earnings.Result` (maintainable earnings), and a resolved
-`settings.Resolution` to compute actual valuation outputs — SDE multiples,
-EBITDA multiples, DCF, capitalization of earnings, adjusted net asset
-value, per the methods already modeled in `settings.Method`. It should
-remain just as pure and infrastructure-free as the existing packages: data
-in, valuation results out, no persistence, no UI, no knowledge of where the
-inputs came from.
+`financial/metrics`, `financial/adjustments`, `financial/earnings`,
+`valuation` (and its five method subpackages), and `settings` all in
+place, every method now produces a version-stamped, fully-explained
+`Result` independently — but nothing yet decides *which* methods apply to
+a given business, combines multiple methods' results into a single
+consensus value, or explains how sensitive that value is to its
+assumptions. The next natural addition is a **method
+applicability/consensus** package (e.g. `valuation/consensus/` or
+`valuation/orchestrator/`) that consumes a resolved `settings.Resolution`
+(which methods are enabled, per `settings.Method`/`MethodEnabled`) plus
+each enabled method's `Result`, and:
+
+- decides which methods are *applicable* to a given business at all (e.g.
+  a DCF needs a forecast the caller may not have supplied; an adjusted net
+  asset value method may be judged inapplicable to a strong going-concern
+  business, or vice versa for a distressed one) — likely surfaced as its
+  own structured `Applicability`/reason type, following this repository's
+  established "never a bare boolean" convention
+  (`reconciliation.Status`, `valuation.IssueSeverity`);
+- combines multiple applicable methods' `Result`s — which, per
+  [Enterprise value vs. equity value](#enterprise-value-vs-equity-value),
+  may arrive as a mix of `enterprise_value`, `equity_value`, and
+  `asset_value` results — into a single weighted or ranged consensus
+  value, with the same non-negotiable explainability every package here
+  has: which methods contributed, at what weight, and why;
+- and/or performs sensitivity analysis (e.g. how the DCF's enterprise
+  value moves across a discount-rate/terminal-growth-rate grid) as a pure
+  function over an existing `dcf.Input`, without this repository ever
+  reaching into scenario-generation or forecasting itself.
+
+It should remain just as pure and infrastructure-free as the existing
+packages: data in, consensus/sensitivity results out, no persistence, no
+UI, no knowledge of where the inputs came from. Report rendering, a data
+model for persisting a full valuation (methods + consensus + sensitivity)
+as a single historical record, AI/LLM assistance, and a database remain
+out of scope for that module too — see
+[How this is intended to be integrated later](#how-this-is-intended-to-be-integrated-later).
 
 **Unresolved domain assumptions left for that module (or a later revision
-of `financial/adjustments`/`financial/earnings`) to address:**
+of an earlier package) to address:**
 
 - `financial/adjustments` does not itself compute a market-rate
   replacement-owner salary for `TypeOwnerCompensationNormalization` — the
@@ -1073,3 +1482,31 @@ of `financial/adjustments`/`financial/earnings`) to address:**
   exactly what the formula says and leaving business-judgment plausibility
   review to a human or a future review-workflow layer, rather than this
   package guessing at what counts as "too large."
+- **`valuation/capitalization` does not verify its earnings base matches
+  its own equity-value labeling.** The package always reports
+  `ValueTypeEquity`, which is correct for an SDE-like or owner-net-income
+  earnings base but would be a mislabeled *enterprise* value if a caller
+  supplied a debt-free/EBIT-like earnings figure instead — this package
+  has no way to detect which kind of figure it was handed. A future
+  module (or a documentation-only convention enforced at the call site)
+  should make explicit which earnings base each caller is expected to
+  supply, rather than this package guessing.
+- **No method validates its multiple/rate against a plausible range.** A
+  multiple of 50x or a capitalization rate of 200% both pass validation
+  today (only sign/finiteness/ordering are checked) — implausible-but-
+  technically-valid assumptions are allowed through uncaught, mirroring
+  `financial/adjustments`' identical stance on unchecked adjustment
+  magnitude above. A future review-workflow layer, not this package, is
+  expected to catch "technically valid but implausible" input.
+- **No cross-method reconciliation exists yet.** Each method here is
+  independently correct and independently explainable, but nothing
+  compares, say, an EBITDA-multiple equity value against a DCF equity
+  value for the same business and flags a large divergence — that is
+  exactly the applicability/consensus module's job, deliberately not
+  built prematurely into any individual method package.
+- **The DCF's mid-year convention is a single global on/off flag**
+  (`Input.MidYearConvention`), applied identically to every forecast
+  period and the terminal value. A more granular model (e.g. mid-year for
+  operating cash flow but end-of-year for a known one-time terminal
+  transaction) is not supported and would need a per-period override this
+  package's `Input` does not currently expose.

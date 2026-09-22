@@ -1,0 +1,122 @@
+{
+  "_comment": "Per-archetype valuation method assumptions (multiples, capitalization rate, DCF forecast/rates, adjusted net asset value line items). Consumed by valuation/*/fixtures_test.go, which derives each archetype's maintainable SDE/EBITDA live from financial/metrics.Calculate over the corresponding fixtures/normalized_<archetype>_multi_year.json 2025 snapshot (mirroring financial/adjustments' fixture pattern) rather than duplicating those figures here, so this file holds only the method assumptions a caller supplies on top of that baseline. Expected outputs are computed in the tests themselves from these assumptions plus the live snapshot, so they can never drift from Calculate's actual behavior.",
+  "hvac": {
+    "_comment": "Small owner-operated HVAC service business. SDE multiple is the conventional main-street range for a single-owner trade business; EBITDA multiple is lower since most of this business's earnings are attributable to owner labor, not a bench of management.",
+    "sde_multiple": 2.5,
+    "ebitda_multiple": 3.5,
+    "capitalization_rate": 0.30,
+    "dcf": {
+      "forecast_periods": [
+        { "period": "2026", "free_cash_flow": 130000 },
+        { "period": "2027", "free_cash_flow": 140000 },
+        { "period": "2028", "free_cash_flow": 150000 }
+      ],
+      "discount_rate": 0.22,
+      "terminal_growth_rate": 0.03
+    },
+    "net_asset_value": {
+      "assets": [
+        { "label": "Cash", "amount": 63000, "source_code": "BS_CASH" },
+        { "label": "Accounts Receivable", "amount": 44500, "source_code": "BS_ACCOUNTS_RECEIVABLE" },
+        { "label": "Inventory", "amount": 17800, "source_code": "BS_INVENTORY" },
+        { "label": "Fixed Assets (net of accumulated depreciation)", "amount": 87000, "source_code": "BS_FIXED_ASSETS", "notes": "carried at book value; no appraisal override supplied" }
+      ],
+      "liabilities": [
+        { "label": "Accounts Payable", "amount": 24500, "source_code": "BS_ACCOUNTS_PAYABLE" },
+        { "label": "Other Current Liabilities", "amount": 4400, "source_code": "BS_CURRENT_LIABILITY_OTHER" },
+        { "label": "Short-Term Debt", "amount": 8000, "source_code": "BS_SHORT_TERM_DEBT" },
+        { "label": "Long-Term Debt", "amount": 47000, "source_code": "BS_LONG_TERM_DEBT" }
+      ]
+    }
+  },
+  "agency": {
+    "_comment": "Professional services / marketing agency. Higher SDE and EBITDA multiples than HVAC reflect a more transferable client-relationship-driven revenue base; debt-free per the underlying fixture.",
+    "sde_multiple": 2.8,
+    "ebitda_multiple": 4.5,
+    "capitalization_rate": 0.28,
+    "dcf": {
+      "forecast_periods": [
+        { "period": "2026", "free_cash_flow": 180000 },
+        { "period": "2027", "free_cash_flow": 205000 },
+        { "period": "2028", "free_cash_flow": 230000 }
+      ],
+      "discount_rate": 0.20,
+      "terminal_growth_rate": 0.035
+    },
+    "net_asset_value": {
+      "assets": [
+        { "label": "Cash", "amount": 146000, "source_code": "BS_CASH" },
+        { "label": "Accounts Receivable", "amount": 172000, "source_code": "BS_ACCOUNTS_RECEIVABLE" },
+        { "label": "Prepaid Expenses", "amount": 9000, "source_code": "BS_PREPAID" },
+        { "label": "Fixed Assets", "amount": 26000, "source_code": "BS_FIXED_ASSETS" },
+        { "label": "Intangible Assets (client list, book value)", "amount": 10000, "source_code": "BS_INTANGIBLE_ASSETS", "notes": "no independent appraisal supplied; carried at book value" }
+      ],
+      "liabilities": [
+        { "label": "Accounts Payable", "amount": 44500, "source_code": "BS_ACCOUNTS_PAYABLE" },
+        { "label": "Other Current Liabilities", "amount": 13000, "source_code": "BS_CURRENT_LIABILITY_OTHER" }
+      ]
+    }
+  },
+  "manufacturer": {
+    "_comment": "Manufacturer with no owner-operator (SDE == EBITDA in the underlying fixture). SDE multiple is included for completeness/orchestrator symmetry even though a manufacturer of this size would typically be valued off EBITDA in practice. Fixed assets carry an appraisal override reflecting real estate/equipment fair value above depreciated book value.",
+    "sde_multiple": 3.0,
+    "ebitda_multiple": 5.5,
+    "capitalization_rate": 0.18,
+    "dcf": {
+      "forecast_periods": [
+        { "period": "2026", "free_cash_flow": 1050000 },
+        { "period": "2027", "free_cash_flow": 1100000 },
+        { "period": "2028", "free_cash_flow": 1160000 },
+        { "period": "2029", "free_cash_flow": 1220000 }
+      ],
+      "discount_rate": 0.16,
+      "terminal_growth_rate": 0.025
+    },
+    "net_asset_value": {
+      "assets": [
+        { "label": "Cash", "amount": 238000, "source_code": "BS_CASH" },
+        { "label": "Accounts Receivable", "amount": 690000, "source_code": "BS_ACCOUNTS_RECEIVABLE" },
+        { "label": "Inventory", "amount": 985000, "source_code": "BS_INVENTORY" },
+        { "label": "Prepaid Expenses", "amount": 24800, "source_code": "BS_PREPAID" },
+        { "label": "Fixed Assets (net book value)", "amount": 1595000, "source_code": "BS_FIXED_ASSETS", "notes": "book value prior to appraisal override" },
+        { "label": "Fixed Assets (appraisal fair-value adjustment)", "amount": 405000, "is_override": true, "notes": "independent appraisal of plant & equipment values the facility 405,000 above depreciated book value" }
+      ],
+      "liabilities": [
+        { "label": "Accounts Payable", "amount": 455000, "source_code": "BS_ACCOUNTS_PAYABLE" },
+        { "label": "Other Current Liabilities", "amount": 71000, "source_code": "BS_CURRENT_LIABILITY_OTHER" },
+        { "label": "Short-Term Debt", "amount": 140000, "source_code": "BS_SHORT_TERM_DEBT" },
+        { "label": "Long-Term Debt", "amount": 825000, "source_code": "BS_LONG_TERM_DEBT" }
+      ]
+    }
+  },
+  "saas": {
+    "_comment": "Growth-stage software company. High EBITDA multiple reflects recurring-revenue growth profile; debt-free with a large cash balance per the underlying fixture. Capitalization of earnings is included for orchestrator symmetry even though a high-growth SaaS business is poorly suited to a single-period capitalization method in practice (see this fixture's expected DCF/EBITDA results being materially higher, which a future consensus module would need to reconcile).",
+    "sde_multiple": 4.0,
+    "ebitda_multiple": 8.0,
+    "capitalization_rate": 0.15,
+    "dcf": {
+      "forecast_periods": [
+        { "period": "2026", "free_cash_flow": 1100000 },
+        { "period": "2027", "free_cash_flow": 1350000 },
+        { "period": "2028", "free_cash_flow": 1650000 },
+        { "period": "2029", "free_cash_flow": 2000000 },
+        { "period": "2030", "free_cash_flow": 2400000 }
+      ],
+      "discount_rate": 0.18,
+      "terminal_growth_rate": 0.04
+    },
+    "net_asset_value": {
+      "assets": [
+        { "label": "Cash", "amount": 1410000, "source_code": "BS_CASH" },
+        { "label": "Accounts Receivable", "amount": 318000, "source_code": "BS_ACCOUNTS_RECEIVABLE" },
+        { "label": "Prepaid Expenses", "amount": 38000, "source_code": "BS_PREPAID" },
+        { "label": "Fixed Assets", "amount": 96000, "source_code": "BS_FIXED_ASSETS" },
+        { "label": "Intangible Assets (capitalized software, book value)", "amount": 185000, "source_code": "BS_INTANGIBLE_ASSETS", "notes": "no independent appraisal supplied; carried at book value" }
+      ],
+      "liabilities": [
+        { "label": "Accounts Payable", "amount": 134000, "source_code": "BS_ACCOUNTS_PAYABLE" },
+        { "label": "Other Current Liabilities", "amount": 55000, "source_code": "BS_CURRENT_LIABILITY_OTHER" }
+      ]
+    }
+  }
+}
