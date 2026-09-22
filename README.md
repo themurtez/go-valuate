@@ -256,6 +256,7 @@ go-valuate/
   financial/metrics/         centralized derived-metrics engine (EBITDA, SDE, trends, ...)
   financial/adjustments/     explicit normalization adjustments -> normalized EBITDA/SDE bridges
   financial/earnings/        maintainable-earnings selection across historical periods
+  analytics/qoe/             quality-of-earnings analysis: adjustment burden, recurrence, flags, score
   valuation/                 common valuation result envelope (value types, bridge, issues)
   valuation/sde/              SDE multiple method
   valuation/ebitda/           EBITDA multiple method
@@ -2036,6 +2037,184 @@ for all four business archetypes' EBITDA series run through
 `trend_adjusted`, including a case that appends a synthetic YTD period to
 confirm it's excluded rather than blended into the fiscal-year average.
 
+### `analytics/qoe`
+
+Produces a deterministic **quality-of-earnings (QoE)** analysis from a
+normalized `financial.FinancialDataset` plus a caller's confirmed
+`financial/adjustments.Adjustment` set and chosen
+`financial/earnings.Result` maintainable-earnings figures — the package a
+caller reaches for once EBITDA/SDE have been normalized and a maintainable
+figure selected, to answer "how good is this earnings number, and why,"
+rather than just "what is it."
+
+This package computes nothing upstream of that: it does not classify raw
+rows, does not decide which adjustments are legitimate, and does not pick a
+maintainable-earnings strategy on the caller's behalf. It recomputes
+`financial/metrics.Snapshot` values across every period in the dataset
+itself (rather than accepting a pre-built `metrics.Result`), walks each
+period's normalized-EBITDA/SDE bridge via `financial/adjustments.Apply`,
+and turns that per-period history into one explainable `Result`. Every
+function is pure — no I/O, no mutation of caller-owned input — and
+`Calculate` is proven to return byte-for-byte identical JSON across
+repeated runs against identical input.
+
+```go
+res := qoe.Calculate(qoe.Input{
+    Dataset:             dataset,             // financial.FinancialDataset
+    PeriodMeta:          periodMeta,          // map[financial.Period]metrics.PeriodInfo
+    Adjustments:         confirmedAdjustments, // []adjustments.Adjustment (Included == true ones apply)
+    MaintainableEBITDA:  maintainableEBITDA,  // earnings.Result, basis = normalized EBITDA
+    MaintainableSDE:     maintainableSDE,     // earnings.Result, basis = normalized SDE
+}, qoe.Options{ComputeScore: true})
+
+fmt.Println(res.Ratios.AdjustmentToEBITDA.Value, res.Flags, res.Score.Value)
+```
+
+A caller typically sequences this two-pass, since `financial/earnings.Calculate`
+itself needs `qoe`'s normalized-EBITDA/SDE series as its `Observation`s: run
+`Calculate` once with `MaintainableEBITDA`/`MaintainableSDE` left zero to get
+`Result.History`, build `earnings.Observation`s from
+`History[i].NormalizedEBITDA`/`NormalizedSDE`, run `earnings.Calculate`, then
+run `qoe.Calculate` again with those results supplied — see
+[`analytics/qoe/fixtures_test.go`](analytics/qoe/fixtures_test.go)'s
+`runQoE` helper for the exact sequencing every test in the package uses.
+
+#### What `Result` contains
+
+| Field | What it is |
+|---|---|
+| `History` | One `PeriodFigures` per period (chronological when `PeriodMeta` is supplied and complete, else dataset order): reported vs. normalized EBITDA/SDE, the full `metrics.Snapshot`, and the full `adjustments.Result` bridge for that period. |
+| `Adjustments` | `AdjustmentBreakdown` — total confirmed adjustment contribution across every period in `History`, **kept separate for EBITDA and SDE** (never summed together — a single `Adjustment` can target one bridge, the other, or both, and its EBITDA-bridge and SDE-bridge `SignedAmount` are not always equal, most visibly for `TypeOwnerCompensationNormalization`), plus a per-`adjustments.Type` breakdown sorted by `Type` string. |
+| `Recurrence` | `[]RecurrencePattern` — every nominally non-recurring `adjustments.Type` (`one_time_expense`, `non_recurring_professional_fees`, `unusual_gain`, `unusual_loss`) that appeared in confirmed, applied lines, with the distinct periods it appeared in and whether that count meets `Thresholds.RepeatedOneTimeMinPeriods`. See [Repeated one-time detection](#repeated-one-time-detection) below. |
+| `RecurringAdjustments` | `RecurringSummary` — every confirmed, applied adjustment line split into three buckets by its `Type`'s *inherent* nature (recurring: owner compensation/personal vehicle/personal travel/owner-discretionary/related-party rent; non-recurring: the same four types `Recurrence` tracks; unclassified: `non_operating_income` and `custom`, whose nature this package cannot infer — see below), each with an EBITDA-bridge total, an SDE-bridge total, and a count. Distinct from `Recurrence`: this asks "is this kind of item expected to recur at all," not "did this specific `Type` actually repeat in this dataset." |
+| `MaintainableEBITDA` / `MaintainableSDE` | Echo `Input.MaintainableEBITDA`/`MaintainableSDE` when `Available`; otherwise the zero `earnings.Result`, with an advisory `Issue` explaining why every dependent ratio/flag was skipped. |
+| `RevenueGrowth`, `RevenueVolatility`, `EBITDAMarginTrend`, `EBITDAVolatility` | Copied verbatim from `metrics.Trend` — never re-derived by hand, so they always match exactly what `financial/metrics` itself would report for this dataset. |
+| `SDEVolatility` | The SDE-basis counterpart to `EBITDAVolatility`, computed by this package using the identical year-over-year-growth sample-standard-deviation method `financial/metrics` uses internally (SDE volatility is out of `metrics.Trend`'s own field set). |
+| `Ratios` | `AdjustmentToEBITDA`/`AdjustmentToSDE` — the absolute adjustment total divided by the absolute reported base, for the most recent period, each a `metrics.MetricValue`. |
+| `Flags` | `[]Flag` — every deterministic quality signal that triggered, in `FlagCode` declaration order. See [Deterministic quality flags](#deterministic-quality-flags) below. |
+| `Score` | `*Score`, populated only when `Options.ComputeScore` is true. See [Earnings quality score](#earnings-quality-score) below. |
+| `Thresholds` | The resolved `Thresholds` (after `DefaultThresholds` substitution) this `Result` was computed under, so a persisted `Result` remains self-describing. |
+| `Warnings` / `Errors` | Structured `Issue`s (own `IssueCode` system — see [Error taxonomy](#error-taxonomy)) for input-level problems (`NO_PERIODS`, `NO_PERIOD_META`, `MAINTAINABLE_EBITDA_UNAVAILABLE`, `MAINTAINABLE_SDE_UNAVAILABLE`). |
+
+#### Deterministic quality flags
+
+Every flag is rule-based against caller-configurable `Thresholds`
+(`DefaultThresholds()` for the conservative defaults; the zero `Thresholds`
+passed to `Calculate` resolves to these, mirroring
+`review.Policy`/`DefaultPolicy`) — **no AI, no opaque scoring**:
+
+| `FlagCode` | Triggers when |
+|---|---|
+| `LARGE_NORMALIZATION_BURDEN` | `Ratios.AdjustmentToEBITDA` or `AdjustmentToSDE` ≥ `LargeNormalizationBurdenRatio` (default 30%). |
+| `DECLINING_EBITDA_DESPITE_REVENUE_GROWTH` | A fiscal-year transition in `RevenueGrowth` shows revenue grew while reported EBITDA (from `History`) declined. |
+| `VOLATILE_EARNINGS` | `EBITDAVolatility` or `SDEVolatility` ≥ `VolatileEarningsRatio` (default 35%). |
+| `INCONSISTENT_MARGINS` | `EBITDAMarginTrend`'s margin values swing (max − min) ≥ `InconsistentMarginSwing` (default 15 points). |
+| `LARGE_OWNER_DISCRETIONARY_COMPONENT` | The most recent period's owner-related SDE-bridge adjustments (owner compensation normalization, personal vehicle/travel, owner-discretionary expense) total ≥ `OwnerDiscretionaryShareOfSDE` (default 25%) of normalized SDE. |
+| `REPEATED_ONE_TIME_ADJUSTMENTS` | At least one `RecurrencePattern.LikelyNotNonRecurring` is true. See below. |
+| `NON_OPERATING_INCOME_SUPPORTING_EARNINGS` | The most recent period's non-operating-income-removal adjustments (`non_operating_income`, `unusual_gain`) total ≥ `NonOperatingIncomeShareOfEBITDA` (default 20%) of reported EBITDA. |
+| `NEGATIVE_OR_NEAR_ZERO_MAINTAINABLE_EARNINGS` | `MaintainableEBITDA`/`MaintainableSDE` ≤ the absolute floor `NearZeroMaintainableEarnings` (default 0) **or** ≤ `NearZeroMaintainableEarningsPercentOfRevenue` (default 2%) of the most recent period's reported revenue — a two-leg OR test mirroring `review.IsMaterial`'s materiality logic, since "near zero" is inherently scale-dependent. |
+
+Every `Flag` carries a stable `Code`, a `Severity` (`info`/`warning`/
+`critical`), the `Period` it concerns (when applicable), a pre-filled
+`Message`, and the exact `Value`/`Threshold` compared — `Message` is display
+only and never parsed by this package's own logic; `Code` is the stable,
+matchable signal.
+
+#### Repeated one-time detection
+
+If the same nominally non-recurring `adjustments.Type` (`one_time_expense`,
+`non_recurring_professional_fees`, `unusual_gain`, `unusual_loss` — **not**
+owner-related types like `personal_vehicle`, which legitimately recur every
+year without being suspicious) appears in confirmed, applied adjustment
+lines across `RepeatedOneTimeMinPeriods` or more distinct periods (default
+**2**), `RecurrencePattern.LikelyNotNonRecurring` is set and
+`REPEATED_ONE_TIME_ADJUSTMENTS` fires. **This package never automatically
+removes or reclassifies the adjustment** — it only surfaces the flag; the
+confirmed adjustment set a caller supplied is never second-guessed or
+mutated.
+
+Deduplication when summing `RecurrencePattern.TotalAmount` is keyed on each
+`Adjustment`'s own `ID` (unique within a single `Apply` call), not on
+`Type` alone — two *different* adjustments of the same `Type` in the same
+period (e.g. one targeting the EBITDA bridge only, another targeting SDE
+only) are two distinct real-world amounts and both must be counted; a naive
+`(period, Type)` dedup would silently drop the second one. See
+[`analytics/qoe/repeated.go`](analytics/qoe/repeated.go)'s
+`buildRecurrence` and the regression test
+`TestBuildRecurrence_DistinctSameTypeAdjustmentsInSamePeriodBothCounted`.
+
+This is a different question from `Result.RecurringAdjustments`
+(`RecurringSummary`): `Recurrence`/`REPEATED_ONE_TIME_ADJUSTMENTS` ask
+"did this specific `Type` actually repeat in this dataset," which only
+applies to the four nominally-non-recurring types. `RecurringSummary`
+instead classifies **every** confirmed, applied line by whether its
+`Type` is *inherently* the kind of thing expected to recur — owner
+compensation normalization, personal vehicle/travel, owner-discretionary
+expense, and related-party rent are always "recurring" in nature by this
+classification, regardless of whether they happened to appear once or
+every year in a given dataset. `non_operating_income` and `custom` land in
+`RecurringSummary`'s `Unclassified` bucket rather than being guessed into
+either side, since `non_operating_income`'s own definition covers both a
+recurring investment-income stream and a one-off asset-sale gain without
+distinguishing which, and `custom` is caller-defined with no inherent
+nature this package can infer.
+
+#### Earnings quality score
+
+Optional, deterministic, and explicitly labeled a **heuristic composite,
+not an accounting standard** (`Score.Heuristic` is always `true` in the
+JSON output itself, not just in documentation). Populated only when
+`Options.ComputeScore` is true — a caller that wants only flags and raw
+measures gets exactly that, with no implied endorsement that one composite
+number is meaningful for their use case.
+
+Exact, fixed formula (`ScoreVersion`, versioned independently of
+`FormulaVersion` — see [Versioning strategy](#versioning-strategy)):
+
+```
+100 points, baseline
+- 15 points  per "critical"-severity Flag
+-  8 points  per "warning"-severity Flag
+-  3 points  per "info"-severity Flag
+clamped to [0, 100]
+```
+
+Every deduction reads only `Result.Flags` (already-computed, already-
+explainable rule-based signals) — `Score` never introduces a new threshold
+or computation of its own, so it can never disagree with `Flags` about
+whether something is a problem; it only weights already-identified problems
+into one number. `Score.Components` lists each deduction in the same order
+as `Result.Flags`, so a caller can reconstruct `Score.Value` from
+`Result.Flags` alone. `Score.Label` is a fixed characterization band (`high
+quality` ≥ 85, `moderate quality` ≥ 65, `elevated concern` ≥ 40, `low
+quality` otherwise) — display only, never parsed.
+
+#### Exported surface, by file
+
+- **`types.go`** — `Input`, `Options`, `Result`, `PeriodFigures`,
+  `AdjustmentBreakdown`, `TypeBreakdown`, `RecurrencePattern`,
+  `RecurringSummary`, `Ratios`, `FlagCode`/`FlagSeverity`/`Flag`,
+  `IssueCode`/`IssueSeverity`/`Issue`, `HasErrors`, `FormulaVersion`.
+- **`thresholds.go`** — `Thresholds`, `DefaultThresholds()`.
+- **`qoe.go`** — `Calculate(Input, Options) Result`, the per-period
+  metrics/adjustments wiring, `AdjustmentBreakdown`/`Ratios` aggregation,
+  and this package's own `SDEVolatility` computation.
+- **`repeated.go`** — `buildRecurrence` (repeated one-time detection) and
+  `buildRecurringSummary` (inherent recurring/non-recurring/unclassified
+  classification — see [What `Result` contains](#what-result-contains)).
+- **`flags.go`** — every deterministic flag-trigger rule.
+- **`score.go`** — `Score`, `ScoreComponent`, `ScoreVersion`,
+  `computeScore`.
+
+See [`analytics/qoe/flags_test.go`](analytics/qoe/flags_test.go) and
+[`analytics/qoe/qoe_test.go`](analytics/qoe/qoe_test.go) for every flag and
+edge case (clean stable business, high adjustment burden, repeated one-time
+costs, volatile earnings, declining margins despite revenue growth,
+negative EBITDA, owner-heavy SDE, zero adjustments, missing/partial
+`PeriodMeta`) exercised against both the repository's realistic multi-year
+fixtures and hand-built minimal datasets sized to cross specific
+thresholds.
+
 ### `valuation`
 
 Implements the individual valuation methods themselves: SDE multiple,
@@ -3200,6 +3379,8 @@ persist historical valuations").
 | Report schema | `report.SchemaVersion`, echoed on `report.Report.SchemaVersion` | This package's own `Report` shape — distinct from any upstream package's version, which is separately echoed inside each section |
 | Settings resolution schema | `settings.ResolutionSchemaVersion`, echoed on `settings.Resolution.SchemaVersion` | The `Values`/`Sources` shape `Resolve` produces |
 | Review schema | `review.SchemaVersion`, echoed on `review.Plan.Version` | `ReviewItem`/`Plan`/`Decision`/`ApplyResult` shapes and the deterministic ID/severity/readiness rules that produce them (`review`) |
+| QoE analysis formulas | `qoe.FormulaVersion`, echoed on `qoe.Result.FormulaVersion` | The fixed ratio formulas, `DefaultThresholds`, and flag-trigger rules (`analytics/qoe`) |
+| QoE heuristic score | `qoe.ScoreVersion`, echoed on `qoe.Score.Version` | The fixed baseline/deduction/clamp/label-band formula (`analytics/qoe`) — versioned separately from `qoe.FormulaVersion` since a caller may change how flags/ratios are computed independently of how they are weighted into one composite number |
 | AI request/response schema | `ai.RequestSchemaVersion`, echoed on `ai.Provenance.RequestSchemaVersion` | The `Request`/`Response` wire shape `financial/classification/ai` sends to/expects from a `Classifier` |
 | AI fallback orchestration | `ai.OrchestrationVersion`, echoed on `ai.Provenance.OrchestrationVersion` | The trigger/fallback/safety decision logic in `ClassifyWithFallback`/`ClassifyBatchWithFallback` (which `FallbackMode` runs AI when, structural-row skipping, disagreement handling) |
 | OpenAI adapter (classification) | `openai.AdapterVersion`, echoed on `ai.Provenance.AdapterVersion` | This specific provider adapter's prompt-construction/response-parsing logic (`financial/classification/ai/openai`) |
@@ -3238,6 +3419,10 @@ unverified incidental property of the standard library).
 | `valuation/consensus.Result.Requested` / `Included` / `Conversions` | `Requested` preserves caller order exactly; `Included` and `Conversions` preserve that same order (with excluded entries removed from `Included` only) |
 | `valuation/report.Report.Methods` | Same fixed method order (`methodOrder`, mirroring the orchestrator's) |
 | `review.Plan.Items` | Primarily by `Severity` (`BLOCKING`, `ERROR`, `WARNING`, `INFO`), then by `Kind` (string order), then by `SourceRowID`, then by `ID` — a real `sort.SliceStable` over exactly these keys (`review`'s `sortItems`), never left to `Build`'s internal append order |
+| `qoe.Result.History` | Chronological when `Input.PeriodMeta` covers every period in the dataset (by `FiscalYear`, then granularity, then `SequenceInYear`); falls back to `financial.FinancialDataset.Periods()`'s lexical order when `PeriodMeta` is nil/partial, rather than guessing a partial sort (`analytics/qoe`) |
+| `qoe.AdjustmentBreakdown.ByType` / `qoe.Result.Recurrence` | Sorted by `adjustments.Type` string (`analytics/qoe`'s `buildAdjustmentBreakdown`/`buildRecurrence`) |
+| `qoe.RecurrencePattern.Periods` | Chronological, matching the period order `History` was built in (never re-sorted lexically, since `financial.Period`'s string value has no guaranteed chronological order) |
+| `qoe.Result.Flags` | `FlagCode` declaration order (`LARGE_NORMALIZATION_BURDEN` through `NEGATIVE_OR_NEAR_ZERO_MAINTAINABLE_EARNINGS`), then by `Period` within a code — never a severity-ranked priority queue, since a QoE flag list is read as a checklist |
 | `ai.BatchOutcome.Outcomes` (`financial/classification/ai`) | Input order preserved exactly: `Outcomes[i]` always corresponds to the `i`-th row passed to `ClassifyBatchWithFallback` |
 | `ai.BatchOutcome.Outcomes` (`financial/adjustments/ai`) | Input order preserved exactly: `Outcomes[i]` always corresponds to the `i`-th `Request` passed to `SuggestAdjustmentsBatch` |
 
@@ -3246,7 +3431,7 @@ unverified incidental property of the standard library).
 Most packages in this repository do not return a Go `error` at all —
 invalidity is communicated through `Result.Available` plus structured
 `Result.Errors`/`Result.Warnings` (see each package's own section above).
-Where a package does surface structured problems, it uses one of three
+Where a package does surface structured problems, it uses one of several
 established, stable-code systems rather than a caller having to parse
 message strings:
 
@@ -3282,6 +3467,20 @@ message strings:
   serve `review` would either leak review-specific codes into
   `financial`/`valuation` or vice versa — the same reasoning above applied
   a third time.
+- **`qoe.Issue{Code qoe.IssueCode, Severity, Message}`** — `analytics/qoe`'s
+  own separate system (`NO_PERIODS`, `NO_PERIOD_META`,
+  `MAINTAINABLE_EBITDA_UNAVAILABLE`, `MAINTAINABLE_SDE_UNAVAILABLE`), a
+  fourth system: an input-level QoE-analysis problem ("no periods in
+  dataset," "no maintainable-earnings figure supplied") is a different
+  problem domain from `adjustments`' adjustment-set consistency problem,
+  `review`'s decision-validation problem, or `valuation`'s rate/weight/
+  value-basis validity problem, even though `qoe` reads `adjustments.Result`
+  directly. `qoe` also defines its own separate `FlagCode` vocabulary
+  (`LARGE_NORMALIZATION_BURDEN`, `VOLATILE_EARNINGS`, etc.) for a
+  structurally different purpose — a quality *signal*, not an input
+  *problem* — mirroring how `orchestrator.ExclusionReason` and
+  `applicability.Reason` sit alongside this taxonomy without being folded
+  into it (see below).
 - **`ai.Issue{RowID, Code ai.IssueCode, Severity, Message}`** —
   `financial/classification/ai`'s own separate system (`AI_DISABLED`,
   `AI_PROVIDER_UNAVAILABLE`, `AI_TIMEOUT`, `AI_PROVIDER_ERROR`,
@@ -3314,15 +3513,16 @@ message strings:
   `Result.Errors` entry, since a malformed row is a true parse/validate
   failure `Normalize` cannot proceed past, not a domain outcome a
   `Result.Available` flag can represent. `Code` is stable and matchable
-  exactly like the six systems above (`UNRECOGNIZED_STATUS`,
+  exactly like the systems above (`UNRECOGNIZED_STATUS`,
   `MISSING_CODE`); a caller must branch on `Code`, never parse `Reason`,
   which is free text.
 
-Two structured-but-not-error-severity vocabularies exist alongside these
+Three structured-but-not-error-severity vocabularies exist alongside these
 and are not folded in, since they already serve the "stable, matchable"
 purpose this taxonomy is for: `orchestrator.ExclusionReason` (why a method
-never ran) and `applicability.Reason{Kind, Detail, Points}` (a scoring
-contribution, not a failure).
+never ran), `applicability.Reason{Kind, Detail, Points}` (a scoring
+contribution, not a failure), and `qoe.FlagCode` (a quality signal, not a
+failure — see above).
 
 This is deliberately a small, flat set of additions — not a new
 framework — sized to what a future consuming application actually needs
