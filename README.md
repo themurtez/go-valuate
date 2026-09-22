@@ -260,6 +260,7 @@ go-valuate/
   analytics/workingcapital/  operating working-capital history, statistics, seasonality, and peg analysis
   analytics/ratios/          financial-ratio suite: profitability/liquidity/leverage/efficiency/growth, trends, signals
   analytics/cashflow/        EBITDA-to-free-cash-flow bridge, conversion ratios, coverage, burn/runway
+  analytics/revenuequality/  revenue composition, growth/volatility, customer retention, concentration
   valuation/                 common valuation result envelope (value types, bridge, issues)
   valuation/sde/              SDE multiple method
   valuation/ebitda/           EBITDA multiple method
@@ -2645,6 +2646,167 @@ estimate-vs-reported distinction, debt-service and distribution coverage,
 and JSON/determinism) exercised against both the repository's realistic
 multi-year fixtures and hand-built minimal datasets.
 
+### `analytics/revenuequality`
+
+A deterministic **revenue-quality analysis**: period-level revenue
+composition (recurring vs. non-recurring), growth/CAGR/volatility, and —
+when a caller supplies customer-level detail — customer retention,
+new/lost/expansion/contraction revenue, and concentration
+(top-N shares, HHI).
+
+This repository's canonical `financial.Code` taxonomy carries revenue at
+only four flat codes (`CodeRevProduct`, `CodeRevService`,
+`CodeRevRecurring`, `CodeRevOther`), each a mutually-exclusive
+classification with no finer recurring/non-recurring split within a single
+line item. So this package's dataset-level split is exactly as fine-grained
+as the taxonomy allows: `CodeRevRecurring` is recurring revenue, and the
+other three summed together are non-recurring — a caller whose source data
+needs finer granularity reclassifies upstream, onto `CodeRevRecurring`,
+before this package can see it as recurring.
+
+Customer-level analysis is **entirely optional** and activates only when a
+caller supplies `Input.CustomerRevenue` — a portable
+`CustomerPeriodRevenue{CustomerKey, Period, Amount, RecurringFlag, Segment}`
+input type with no PII requirement and no application customer/account
+object. Customer-over-customer comparisons are computed only between
+**chronologically adjacent periods** (never arbitrary caller-specified
+pairs), mirroring `analytics/cashflow.Bridge.ChangeInNWC`'s identical
+adjacent-period convention.
+
+**This package never claims SaaS-style NRR/GRR.** Those ratios carry
+contractual assumptions (a defined subscription book, cohort tracking, a
+consistent renewal cadence) this package's caller-agnostic input cannot
+guarantee holds for every business it might analyze. Instead it reports the
+underlying dollar movements directly — `RetainedRevenue`,
+`NewCustomerRevenue`, `LostCustomerRevenue`, `ExpansionRevenue`,
+`ContractionRevenue` — and leaves any SaaS-specific ratio as arithmetic a
+caller performs once it has independently confirmed its business matches
+that model's assumptions.
+
+Every function is pure — no I/O, no mutation of caller-owned input — and
+`Calculate` returns byte-for-byte identical JSON across repeated runs
+against identical input, regardless of Go's randomized map iteration order
+(every customer/segment aggregation this package performs internally is
+accumulated in sorted-key order before any float64 summation, since
+floating-point addition is not associative).
+
+```go
+res := revenuequality.Calculate(revenuequality.Input{
+    Dataset:    dataset,    // financial.FinancialDataset
+    PeriodMeta: periodMeta, // map[financial.Period]revenuequality.PeriodInfo
+    CustomerRevenue: []revenuequality.CustomerPeriodRevenue{
+        {CustomerKey: "cust-1", Period: "2024", Amount: 120_000, Segment: "enterprise"},
+        {CustomerKey: "cust-1", Period: "2025", Amount: 150_000, Segment: "enterprise"},
+        {CustomerKey: "cust-2", Period: "2025", Amount: 40_000, Segment: "smb"}, // new in 2025
+    },
+}, revenuequality.Options{})
+
+last := res.TotalRevenueHistory[len(res.TotalRevenueHistory)-1]
+fmt.Println(last.RecurringPercent.Value, res.ConcentrationSummary.HHI.Value)
+```
+
+#### Revenue composition and trend
+
+Each `PeriodRevenue` in `TotalRevenueHistory` carries `TotalRevenue`,
+`RecurringRevenue`, `NonRecurringRevenue`, and their percentages —
+`RecurringPercent`/`NonRecurringPercent` are `Available` only when all three
+underlying figures are (never computed from a partial revenue picture, e.g.
+a dataset with `CodeRevRecurring` but a missing `CodeRevProduct` for a
+period that actually earned product revenue). `RevenueTrend` (first-vs-last,
+the same fixed ±5% flat band every sibling package's `Trend` uses),
+`RevenueGrowth` (one `GrowthPoint` per chronologically adjacent pair),
+`RevenueCAGR`, and `RevenueVolatility` (sample standard deviation of the
+period-over-period growth-rate series) all require `Input.PeriodMeta` to
+establish chronological order — without it, they are left `Unavailable`
+with an advisory `NO_PERIOD_META` warning, while per-period
+`TotalRevenueHistory` still computes fully in dataset lexical order.
+
+#### Customer transitions
+
+Each `CustomerTransition` compares one chronologically adjacent period pair
+and classifies every customer into new, lost, retained, expanded, or
+contracted, summing each category's dollar impact —
+`RetainedRevenue + ExpansionRevenue - ContractionRevenue` reconstructs each
+retained customer's full to-period revenue. `FromPeriodTotalRevenue` /
+`ToPeriodTotalRevenue` / `TotalRevenueGrowth` are each period's true summed
+customer revenue, computed once and stored directly on the transition —
+every ratio this package derives against "the from-period total" (the
+lost-revenue and shrinking-base flags below) reads these fields rather than
+reconstructing the total from the categorized fields, which are **not**
+algebraically sufficient to recover it (`RetainedRevenue` is already
+`min(from, to)` per customer, so `ExpansionRevenue` sits on top of it, not
+inside it — subtracting it back out silently undercounts the true total).
+`ExistingCustomerBaseChange` isolates the net change in revenue from
+customers who were already present in the from-period, excluding
+`NewCustomerRevenue` entirely — negative means the existing base shrank even
+before counting new-customer growth.
+
+#### Concentration
+
+`ConcentrationSummary` is computed once, for the most recent period present
+in `Input.CustomerRevenue` — concentration risk is a point-in-time
+diligence question, not a trend. `TopNShares` reports the share of total
+customer revenue held by each `Policy.ConcentrationTopN` cutoff (default
+`[1, 5, 10]`); `HHI` is the Herfindahl-Hirschman Index on the conventional
+0–10,000 scale; `Segments` breaks down revenue by `CustomerPeriodRevenue.Segment`
+when supplied. `UnallocatedRevenue` (`Dataset`'s total revenue minus the sum
+of customer-level rows for that period) surfaces a reconciliation mismatch
+as data, not an error — a caller's customer export commonly covers only a
+subset of total revenue streams.
+
+#### What `Result` contains
+
+| Field | What it is |
+|---|---|
+| `TotalRevenueHistory` | One `PeriodRevenue` per period (chronological when `PeriodMeta` is supplied and complete, else dataset lexical order): total/recurring/non-recurring revenue and their percentages. |
+| `RevenueStatistics` / `RevenueTrend` / `RevenueGrowth` / `RevenueCAGR` / `RevenueVolatility` | Central tendency/dispersion, first-vs-last direction, period-over-period growth points, compound annual growth rate, and growth-rate volatility across `TotalRevenueHistory`. |
+| `CustomerHistory` | One `CustomerPeriodTotal` per period with customer data: customer count, total customer revenue, and (when any row supplied `RecurringFlag`) the recurring share. |
+| `CustomerTransitions` | One `CustomerTransition` per chronologically adjacent period pair with customer data on both sides — see above. |
+| `ConcentrationSummary` | Top-N shares, HHI, and segment breakdown for the most recent period with customer data. |
+| `Flags` | Deterministic, `Thresholds`-driven signals (see below), ordered by `FlagCode`'s declaration order, then `Period`. |
+| `Warnings` / `Errors` | Structured `Issue`s (own `IssueCode` system — see [Error taxonomy](#error-taxonomy)) for input-level problems (`NO_PERIODS`, `NO_PERIOD_META`, `PERIOD_MISSING_FROM_META`, `NO_REVENUE_DATA`, `NO_CUSTOMER_DATA`, `CUSTOMER_PERIOD_NOT_IN_DATASET`, `CUSTOMER_REVENUE_UNRECONCILED`). |
+
+#### Flags
+
+`Options.Thresholds` (zero value resolves to `DefaultThresholds()`)
+configures six rule-based, deterministic triggers:
+`DECLINING_RECURRING_MIX`, `GROWTH_DEPENDENT_ON_NEW_CUSTOMERS`,
+`HIGH_LOST_CUSTOMER_REVENUE`, `VOLATILE_REVENUE`, `ONE_PERIOD_SPIKE`, and
+`SHRINKING_EXISTING_CUSTOMER_BASE`. Every `Flag` carries a stable `Code`, a
+`Severity` (`info`/`warning`/`critical`), the specific `Value`/`Threshold`
+compared, and a pre-filled `Message` (display only, never parsed) — no
+AI/LLM, no opaque scoring, mirroring `analytics/qoe.Flag` and
+`analytics/cashflow.Flag`'s identical design.
+
+#### Exported surface, by file
+
+- **`types.go`** — `Input`, `Options`, `Result`, `PeriodInfo`/`PeriodType`,
+  `RevenueValue`/`Unavailable`/`AvailableValue`, `CustomerPeriodRevenue`,
+  `Policy`/`DefaultPolicy()`, `PeriodRevenue`, `Component`, `Statistics`,
+  `TrendDirection`/`Trend`, `GrowthPoint`, `CAGRResult`, `VolatilityResult`,
+  `CustomerPeriodTotal`, `CustomerTransition`, `TopNShare`, `SegmentShare`,
+  `ConcentrationSummary`, `Thresholds`/`DefaultThresholds()`,
+  `FlagCode`/`FlagSeverity`/`Flag`, `IssueCode`/`IssueSeverity`/`Issue`,
+  `HasErrors`, `FormulaVersion`.
+- **`revenuequality.go`** — `Calculate(Input, Options) Result`: builds
+  `TotalRevenueHistory` from `Input.Dataset` and wires every other section
+  together.
+- **`stats.go`** — `Statistics`/`Trend`/`GrowthPoint`/`CAGRResult`/
+  `VolatilityResult` computation.
+- **`customers.go`** — customer-row validation, `CustomerHistory`,
+  `CustomerTransitions`, and `ConcentrationSummary` computation.
+- **`flags.go`** — every deterministic flag-trigger rule.
+
+See [`analytics/revenuequality/revenuequality_test.go`](analytics/revenuequality/revenuequality_test.go),
+[`analytics/revenuequality/determinism_test.go`](analytics/revenuequality/determinism_test.go),
+and [`analytics/revenuequality/roundtrip_test.go`](analytics/revenuequality/roundtrip_test.go)
+for every scenario (recurring service business, project business, customer
+churn, growth through new customers, volatile revenue, one-period spike,
+declining recurring mix, missing customer detail, concentration/HHI,
+unreconciled customer revenue, and JSON/determinism) exercised against both
+the repository's realistic multi-year fixtures and hand-built minimal
+datasets.
+
 ### `valuation`
 
 Implements the individual valuation methods themselves: SDE multiple,
@@ -3815,6 +3977,7 @@ persist historical valuations").
 | Ratio analysis formulas | `ratios.FormulaVersion`, echoed on `ratios.Result.FormulaVersion` | Every profitability/liquidity/leverage/efficiency/growth ratio formula, the Total Assets/Total Equity sum-of-codes definitions, and the `RatioTrend`/`Comparison` methodology (`analytics/ratios`) |
 | Ratio signal rules | `ratios.SignalRulesVersion`, echoed on `ratios.Result.SignalRulesVersion` | The fixed `DefaultThresholds` and every signal-trigger rule in `signals.go` (`analytics/ratios`) — versioned separately from `ratios.FormulaVersion` since a caller may change how ratios are computed independently of which signals are derived from them |
 | Cash-flow analysis formulas | `cashflow.FormulaVersion`, echoed on `cashflow.Result.FormulaVersion` | The EBITDA-to-free-cash-flow bridge, every conversion ratio, the `RecurringDrains`/`CashRunway` formulas, the `DefaultThresholds` flag-trigger rules, and the EBITDA-based estimate method used under `Options.AllowEBITDAEstimate` (`analytics/cashflow`) |
+| Revenue-quality analysis formulas | `revenuequality.FormulaVersion`, echoed on `revenuequality.Result.FormulaVersion` | The recurring/non-recurring revenue split, the `Statistics`/`Trend`/`CAGRResult`/`VolatilityResult` formulas, the customer-transition (new/lost/retained/expansion/contraction) formulas, the `ConcentrationSummary`/HHI formula, and the `DefaultThresholds` flag-trigger rules (`analytics/revenuequality`) |
 | AI request/response schema | `ai.RequestSchemaVersion`, echoed on `ai.Provenance.RequestSchemaVersion` | The `Request`/`Response` wire shape `financial/classification/ai` sends to/expects from a `Classifier` |
 | AI fallback orchestration | `ai.OrchestrationVersion`, echoed on `ai.Provenance.OrchestrationVersion` | The trigger/fallback/safety decision logic in `ClassifyWithFallback`/`ClassifyBatchWithFallback` (which `FallbackMode` runs AI when, structural-row skipping, disagreement handling) |
 | OpenAI adapter (classification) | `openai.AdapterVersion`, echoed on `ai.Provenance.AdapterVersion` | This specific provider adapter's prompt-construction/response-parsing logic (`financial/classification/ai/openai`) |
@@ -3869,6 +4032,11 @@ unverified incidental property of the standard library).
 | `cashflow.Result.History` / `Conversion` | Chronological when `Input.PeriodMeta` covers every period in the dataset (by `FiscalYear`, then granularity, then `SequenceInYear`); falls back to `financial.FinancialDataset.Periods()`'s lexical order when `PeriodMeta` is nil/partial (`analytics/cashflow`) |
 | `cashflow.Result.RecurringDrains` | Fixed `RecurringDrainCategory` declaration order (`capex`, `working_capital_build`, `debt_service`, `owner_distributions`) — always all four entries, never Go map order |
 | `cashflow.Result.Flags` | `FlagCode` declaration order (`WEAK_CASH_CONVERSION` through `DECLINING_CONVERSION_TREND`), then by `Period` within a code |
+| `revenuequality.Result.TotalRevenueHistory` / `CustomerHistory` | Chronological when `Input.PeriodMeta` covers every period in the dataset (by `FiscalYear`, then granularity, then `SequenceInYear`); falls back to `financial.FinancialDataset.Periods()`'s lexical order when `PeriodMeta` is nil/partial (`analytics/revenuequality`) |
+| `revenuequality.Result.CustomerTransitions` | Chronological, one entry per adjacent pair in the same order as `CustomerHistory` |
+| `revenuequality.ConcentrationSummary.TopNShares` | Ascending by `N`, deduplicated (`Policy.ConcentrationTopN`) |
+| `revenuequality.ConcentrationSummary.Segments` | Sorted by `Segment` string ascending |
+| `revenuequality.Result.Flags` | `FlagCode` declaration order (`DECLINING_RECURRING_MIX` through `SHRINKING_EXISTING_CUSTOMER_BASE`), then by `Period` within a code |
 
 ## Error taxonomy
 
@@ -3958,6 +4126,22 @@ message strings:
   (`WEAK_CASH_CONVERSION`, `LOW_DEBT_SERVICE_COVERAGE`, etc.), mirroring
   `qoe.FlagCode`/`ratios.SignalCode`'s identical input-problem/quality-signal
   split.
+- **`revenuequality.Issue{Code revenuequality.IssueCode, Severity, Message}`**
+  — `analytics/revenuequality`'s own separate system (`NO_PERIODS`,
+  `NO_PERIOD_META`, `PERIOD_MISSING_FROM_META`, `NO_REVENUE_DATA`,
+  `NO_CUSTOMER_DATA`, `CUSTOMER_PERIOD_NOT_IN_DATASET`,
+  `CUSTOMER_REVENUE_UNRECONCILED`), an eighth system for the same reason as
+  the fourth through seventh above: an input-level revenue-quality-analysis
+  problem is its own problem domain, distinct from its `analytics/` siblings
+  despite the identical `Available`/`Warnings`/`Errors` shape.
+  `CUSTOMER_PERIOD_NOT_IN_DATASET`/`CUSTOMER_REVENUE_UNRECONCILED`
+  specifically flag mismatches between `Input.CustomerRevenue` and
+  `Input.Dataset` — both advisory only, since a caller's customer-level
+  export commonly covers only a subset of total revenue streams or periods.
+  `revenuequality` also defines its own separate `FlagCode` vocabulary
+  (`DECLINING_RECURRING_MIX`, `GROWTH_DEPENDENT_ON_NEW_CUSTOMERS`, etc.),
+  mirroring `qoe.FlagCode`/`ratios.SignalCode`/`cashflow.FlagCode`'s
+  identical input-problem/quality-signal split.
 - **`ai.Issue{RowID, Code ai.IssueCode, Severity, Message}`** —
   `financial/classification/ai`'s own separate system (`AI_DISABLED`,
   `AI_PROVIDER_UNAVAILABLE`, `AI_TIMEOUT`, `AI_PROVIDER_ERROR`,
