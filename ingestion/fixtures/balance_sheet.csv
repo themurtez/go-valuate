@@ -1,0 +1,29 @@
+Precision Manufacturing Co.
+Balance Sheet
+As of December 31, 2025
+
+Account,Dec 31 2024,Dec 31 2025
+Current Assets,,
+Cash,"215,000.00","268,500.00"
+Accounts Receivable,"340,000.00","388,200.00"
+Inventory,"512,000.00","560,750.00"
+Prepaid Expenses,"18,400.00","21,000.00"
+Total Current Assets,"1,085,400.00","1,238,450.00"
+Fixed Assets,,
+Equipment,"890,000.00","940,000.00"
+Accumulated Depreciation,"(310,000.00)","(357,000.00)"
+Total Fixed Assets,"580,000.00","583,000.00"
+Total Assets,"1,665,400.00","1,821,450.00"
+Current Liabilities,,
+Accounts Payable,"228,000.00","251,400.00"
+Short-Term Debt,"75,000.00","60,000.00"
+Total Current Liabilities,"303,000.00","311,400.00"
+Long-Term Liabilities,,
+Long-Term Debt,"420,000.00","385,000.00"
+Total Long-Term Liabilities,"420,000.00","385,000.00"
+Total Liabilities,"723,000.00","696,400.00"
+Equity,,
+Retained Earnings,"742,400.00","924,050.00"
+Owner Equity,"200,000.00","201,000.00"
+Total Equity,"942,400.00","1,125,050.00"
+Total Liabilities and Equity,"1,665,400.00","1,821,450.00"

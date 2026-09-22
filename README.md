@@ -22,6 +22,10 @@ Every stage below is a pure function of the previous stage's output — no
 I/O, no shared mutable state, no hidden global config:
 
 ```
+CSV / XLSX bytes
+        ↓
+Tabular Ingestion          (ingestion, ingestion/csv, ingestion/xlsx)
+        ↓
 Raw financial rows
         ↓
 Classification            (financial/classification)
@@ -60,8 +64,13 @@ and handed into a run rather than looked up mid-calculation (see
 [Settings snapshot contract](#settings-snapshot-contract)).
 
 **What is deliberately absent from every stage above, and from this
-repository entirely:** no database, no HTTP/API layer, no AI/LLM, no
-document parsing (PDF/XLSX/CSV/OCR) — see
+repository entirely:** no database, no HTTP/API layer, no AI/LLM, no PDF
+parsing or OCR. Deterministic CSV/XLSX tabular ingestion (`ingestion`,
+`ingestion/csv`, `ingestion/xlsx`) is the one exception to the
+"no document parsing" rule established in earlier revisions of this
+README — see [`ingestion`](#ingestion) below for why a purely
+structural, non-AI, non-database tabular reader fits this repository's
+constraints while PDF/OCR still does not — see
 [What this project intentionally does not contain](#what-this-project-intentionally-does-not-contain)
 below for the full list and the reasoning behind it. Every stage's output
 is plain, JSON-serializable Go structs; see
@@ -85,6 +94,17 @@ contains **no**:
 - PDF parsing or OCR
 - cloud/storage integrations
 
+Deterministic CSV/XLSX tabular ingestion (`ingestion` and its `csv`/`xlsx`
+subpackages — see [`ingestion`](#ingestion) below) is a narrow, deliberate
+exception: it is pure structural interpretation of already-tabular data
+(rows, columns, headers), performs no AI/ML/OCR, touches no database or
+network, and hands off to `financial/classification` — which this
+repository already contains — rather than duplicating it. PDF parsing and
+OCR remain excluded because turning an unstructured document into tabular
+data is exactly the document-understanding problem this repository's
+"no PDF/OCR" constraint rules out; ingestion only begins once data is
+already in rows and columns.
+
 The design rule is:
 
 ```
@@ -96,8 +116,12 @@ Go structs / JSON-compatible data in
 No global state. No infrastructure dependencies. No side effects. Every
 exported function in this repository is a pure function of its inputs.
 
-Deterministic, rule/alias-based classification (deciding *which* canonical
-code a raw row maps to) is implemented in `financial/classification`;
+Deterministic CSV/XLSX tabular ingestion (structural interpretation of a
+tabular financial statement export into `financial.RawLineItem` values,
+with no classification of its own) is implemented in `ingestion` and its
+`ingestion/csv`/`ingestion/xlsx` subpackages; deterministic, rule/alias-based
+classification (deciding *which* canonical code a raw row maps to) is
+implemented in `financial/classification`;
 dataset-internal-consistency checking is implemented in
 `financial/reconciliation`; derived financial metrics (EBITDA, SDE, working
 capital, growth/volatility, etc.) are implemented in `financial/metrics`;
@@ -119,6 +143,11 @@ application, on top of the types and packages defined here — see
 
 ```
 go-valuate/
+  ingestion/                 CSV/XLSX bytes -> raw tabular rows (no classification)
+  ingestion/csv/              CSV parser (encoding/csv, zero external dependencies)
+  ingestion/xlsx/              XLSX parser (github.com/xuri/excelize/v2)
+  ingestion/internal/tabular/  shared statement-interpretation logic (csv+xlsx)
+  ingestion/fixtures/         CSV/XLSX fixture corpus + XLSX generator (fixtures/gen)
   financial/                 canonical financial model, taxonomy, and normalizer
   financial/classification/  deterministic raw-row -> canonical-code classifier
   financial/reconciliation/  dataset internal-consistency checks
@@ -143,6 +172,263 @@ go-valuate/
   fixtures/                  example JSON matching the Go types, used by tests
                              as living documentation
 ```
+
+### `ingestion`
+
+Deterministic input adapters that convert tabular financial statement
+exports (CSV, XLSX) into `financial.RawLineItem` values, sitting entirely
+ahead of `financial/classification` in the pipeline:
+
+```
+CSV/XLSX bytes
+   ↓
+Tabular Ingestion   (ingestion, ingestion/csv, ingestion/xlsx)
+   ↓
+RawLineItem[]
+   ↓
+Classification      (financial/classification)
+   ↓
+User Confirmation   (future application — resolves UNKNOWN classifications)
+   ↓
+Normalize           (financial)
+```
+
+`ingestion` is developed independently of any future application in the
+same way every other package here is: it is the input-adapter half of the
+"no PDF/OCR" boundary described in
+[What this project intentionally does not contain](#what-this-project-intentionally-does-not-contain)
+— it begins only once data is already tabular (rows and columns), never
+attempts document understanding, and performs **no AI/LLM inference**
+anywhere in its detection logic. Every parser is a pure function of its
+input bytes/reader and `Options`: the same input always produces the same
+`Result`.
+
+**Package layout.**
+
+- **`ingestion`** — the shared, format-agnostic public API: `Options`,
+  `Result`, `Row`, `Cell`, `Metadata`, `Warning`/`Error` taxonomies, and
+  `Result.ToRawLineItems()`. Also hosts `BuildResult`, the shared
+  orchestration entry point both `ingestion/csv` and `ingestion/xlsx` call
+  so statement/period/structural interpretation is implemented exactly
+  once and can never drift between formats.
+- **`ingestion/csv`** — `Parse(io.Reader, Options) (*Result, *Error)` using
+  only the Go standard library's `encoding/csv`. Zero external
+  dependencies, matching the deterministic core's own dependency
+  discipline.
+- **`ingestion/xlsx`** — `Parse(io.Reader, Options) (*Result, *Error)`
+  using `github.com/xuri/excelize/v2` (BSD-3-Clause; see XLSX dependency
+  below). excelize's own types never appear in this package's exported
+  API, so a caller depending on `ingestion/xlsx` never needs to import
+  excelize directly, and the dependency could be swapped later without an
+  API break.
+- **`ingestion/internal/tabular`** — unexported, shared statement-
+  interpretation engine: numeric parsing, period parsing, header/label-
+  column detection, statement-type detection, structural row
+  classification, and parent/section tracking, all operating on a plain
+  `Grid [][]string` with no knowledge of `encoding/csv` or excelize. Both
+  format packages translate their native rows into a `Grid` and call this
+  package, so the CSV and XLSX adapters can never disagree about what
+  counts as a subtotal, a period header, or a statement type.
+- **`ingestion/fixtures`** — the fixture corpus (below) plus
+  `ingestion/fixtures/gen`, a small `go run`-able generator for the binary
+  XLSX fixtures (XLSX is a zip-based binary format unsuitable for hand
+  authoring or text diffing).
+
+**What ingestion decides vs. what it doesn't.** Ingestion determines
+purely *structural* facts about a tabular document: which row holds
+line-item labels, which columns are reporting periods, what a cell's
+numeric value is, whether a row is blank/heading/subtotal/total, and
+(best-effort) which section a row belongs to. It never decides that
+`"Advertising"` maps to `OPEX_MARKETING` — that is exactly
+`financial/classification`'s job, and duplicating any part of it here
+would create two places that could disagree about the same question. A
+`Row.Kind`/`Row.Status` (subtotal/total) is this package's own
+best-effort structural read, used only to populate
+`financial.RawLineItem` via `ToRawLineItems()`; `financial/classification`
+still runs its own independent structural detection over the resulting
+labels (see that package's `structuralTotalTokens`), and the two are not
+required to agree in every case — a label like `"Gross Profit"` is
+recognized as a subtotal by `ingestion`'s label-shape detection but not by
+`financial/classification`'s narrower total/subtotal/net token check,
+since `RawLineItem` carries no field for ingestion's structural read to
+travel on. This is a known, documented gap — see
+[Known deterministic ingestion gaps](#known-deterministic-ingestion-gaps).
+
+**CSV support.** Comma, semicolon, and tab delimiters (auto-detected by
+counting occurrences on the first line, or forced via `Options.Delimiter`);
+UTF-8 byte-order marks (stripped); CRLF and LF line endings; quoted cells
+with embedded delimiters/commas; blank rows; malformed rows (reported as
+`MALFORMED_ROW_SKIPPED` warnings rather than aborting the whole parse,
+since `encoding/csv`'s default behavior is to fail the entire read on one
+bad row).
+
+**XLSX support.** Deterministic worksheet enumeration; explicit sheet
+selection via `Options.SheetName`; auto-selection of the single most
+plausible non-empty sheet by a combination of sheet-name signal (`"P&L"`,
+`"Balance Sheet"` score positively; `"Notes"`, `"Cover"` score negatively)
+and row density; when more than one sheet ties for most-plausible,
+`Parse` returns an **empty result with a `MULTIPLE_PLAUSIBLE_SHEETS`
+warning** rather than silently guessing — sheet selection is always
+deterministic and explainable, never arbitrary. Cell values are read via
+excelize's `GetRows`, which surfaces a formula cell's cached/calculated
+result (exactly what every real authoring application — Excel, Google
+Sheets, QuickBooks — persists alongside the formula) rather than
+re-evaluating the formula; a formula cell with no usable cached value
+produces a `FORMULA_WITHOUT_CACHED_VALUE` warning instead of a fabricated
+number. Formula text is preserved on `Cell.Formula` when present.
+
+**XLSX dependency.** [`github.com/xuri/excelize/v2`](https://github.com/qax-os/excelize)
+(pinned at v2.11.0), **BSD-3-Clause** license — mature, actively
+maintained, one of the most widely used Go Excel libraries, chosen over a
+hand-rolled Office Open XML reader because correctness and maintainability
+of a binary zip/XML-based format matter more here than preserving the
+deterministic core's zero-dependency property, which was never a goal for
+the ingestion layer specifically (see the task brief this package was
+built against). The dependency is isolated behind `ingestion/xlsx`;
+`excelize.File` and every other excelize type stay entirely internal to
+that package.
+
+**Statement-type detection** (`INCOME_STATEMENT`, `BALANCE_SHEET`,
+`CASH_FLOW_STATEMENT`, or undetected/`UNKNOWN`) runs a fixed
+signal-priority pipeline and always records its evidence in
+`Metadata.StatementTypeEvidence`:
+
+1. **sheet name** — e.g. a sheet literally named `"Balance Sheet"`.
+2. **title rows** — non-blank rows above the detected period-header row,
+   matched against phrases like `"profit and loss"`, `"statement of
+   financial position"`, `"statement of cash flows"`.
+3. **line-item labels** — distinctive structural terms anywhere in the
+   sheet (`"gross profit"`, `"total assets"`, `"cash flows from
+   operating"`, etc.), counted per statement type; the type with strictly
+   the most matches wins.
+
+A tie at the line-item tier, or no signal at any tier, leaves
+`Metadata.StatementTypeUnknown = true` rather than forcing a guess — see
+`WarnStatementTypeUnknown`. `Options.StatementTypeOverride` bypasses all of
+this when the caller already knows the statement type.
+
+**Period detection** (`Metadata.Periods`, each a `DetectedPeriod`) scans
+up to the first 15 non-blank rows for the row with the most cells that
+parse as a period, selecting it as the header row (ties go to the row with
+more period-like columns; multiple plausible header rows are reported via
+`MULTIPLE_POSSIBLE_HEADER_ROWS`). Recognized label shapes, each producing
+an explicit `PeriodType` and canonical ID:
+
+| Example label | `PeriodType` | Canonical ID |
+|---|---|---|
+| `2025` | `calendar_year` | `2025` |
+| `FY2025`, `FY 2025`, `FY'25` | `fiscal_year` | `FY2025` |
+| `Q1 2025`, `2025 Q1`, `Q1'25` | `quarter` | `2025Q1` |
+| `12/31/2024`, `Dec 31 2024`, `December 31, 2024`, `2024-12-31` | `calendar_year` | `2024` |
+| `March 2025`, `Mar 2025`, `03/2025` | `month` | `2025-03` |
+| `Jan-Dec 2024` | `calendar_year` | `2024` |
+| `Year Ended December 31, 2024`, `For the Year Ended Dec 31 2024` | `calendar_year` | `2024` |
+| `YTD`, `YTD 2024` | `ytd` | `ytd`, `2024-YTD` |
+| `Current Year`, `Prior Year` (no absolute date) | `unknown` | normalized label |
+
+When a header label matches none of these deterministic rules, ingestion
+**never fabricates a date**: `PeriodType` is `unknown`, the canonical ID
+falls back to a normalized (lowercased, underscored) form of the original
+label, `Confidence` is `0`, and a `PERIOD_LABEL_AMBIGUOUS` warning is
+emitted — `DetectedPeriod.OriginalLabel` always preserves the exact source
+text regardless. `Options.PeriodColumnOverrides` lets a caller pin specific
+columns to specific canonical periods, bypassing detection entirely for
+those columns.
+
+**Numeric parsing** supports common North American financial formatting:
+thousands separators (`"1,234.56"`), a `$` prefix or suffix, parentheses as
+negative (`"(1,234.56)"` → `-1234.56`), a leading `-`/`+` sign in any order
+relative to a currency symbol (`"-$1,234.56"` and `"$-1,234.56"` both
+work), and blank cells. A bare dash/em-dash (`"-"`, `"—"`, `"--"`) is
+`Options.DashTreatment`-controlled: `DashAsBlank` (default, no value) or
+`DashAsZero`. A cell ending in `%` is never coerced into a monetary value
+— it is reported as an `UNPARSEABLE_NUMERIC_CELL` warning, since a
+percentage silently becoming `12` or `0.12` would corrupt aggregation
+without any signal that something went wrong. Any other text that doesn't
+cleanly reduce to a signed decimal (`"N/A"`, `"TBD"`, `"1,234.56 USD"`,
+double-negative forms like `"(-1,234.56)"`) is likewise reported as a
+warning and **never silently becomes zero**.
+
+**Structural/parent detection.** Each row is classified as `blank`
+(no text anywhere), `heading` (has label text but no numeric/dash values —
+a section header like `"Operating Expenses"`), `subtotal`/`total` (label
+starts with `"total"`/`"subtotal"`, or is a recognized whole-statement
+total phrase like `"Net Income"`/`"Total Assets"`), or `normal`. Blank rows
+are always excluded from `Result.Rows` (their `RowIndex` is never
+renumbered around them, so source position stays traceable); heading rows
+are retained in `Result.Rows` for context but excluded from
+`ToRawLineItems()`, since `financial.RawLineItem` has no field to
+represent "this row is a section heading." `Row.ParentLabel` tracks the
+innermost currently-open heading section using a simple indent-aware stack
+(`ParentTracker`): a heading row opens a section at its indent level, a
+subtotal/total row at or below that level closes it, and every other row
+inherits the innermost open section's label — see the `IndentLevel` field
+for the (deliberately coarse) whitespace-based signal this is built on.
+
+**Security and limits.** Every parser treats its input as untrusted:
+macros are never executed (`encoding/csv` and excelize implement no
+macro/VBA runtime at all); formulas are never evaluated — only a
+workbook's own cached value is read; external workbook links are never
+followed or refreshed (`excelize.File.UpdateLinkedValue` is never called).
+`Options.Limits` (defaults via `DefaultLimits()`) bounds `MaxFileSizeBytes`
+(checked before the archive is even opened, and used to bound excelize's
+own `UnzipSizeLimit`/`UnzipXMLSizeLimit` against a zip-bomb-style
+pathological input), `MaxSheets`, `MaxRows`, `MaxColumns`, and
+`MaxCellTextLength` (excess cell text is truncated with a
+`CELL_TEXT_TRUNCATED` warning rather than silently accepted). Every limit
+violation is a fatal `LIMIT_EXCEEDED` error, not a warning, so a caller
+never processes a partially-truncated result without knowing it happened.
+
+**Warning and error taxonomy.** Non-fatal issues (`Warning`, always
+returned alongside a valid `Result`) use stable `WarningCode` values:
+`PERIOD_LABEL_AMBIGUOUS`, `STATEMENT_TYPE_UNKNOWN`,
+`MULTIPLE_POSSIBLE_HEADER_ROWS`, `UNPARSEABLE_NUMERIC_CELL`,
+`FORMULA_WITHOUT_CACHED_VALUE`, `MULTIPLE_PLAUSIBLE_SHEETS`,
+`MALFORMED_ROW_SKIPPED`, `EMPTY_SHEET_SKIPPED`, `CELL_TEXT_TRUNCATED`,
+`STRUCTURAL_INTERPRETATION_UNCERTAIN`. Fatal issues (`*Error`, returned
+alone with a nil `*Result`) use stable `ErrorCode` values:
+`INVALID_FILE`, `NO_TABULAR_DATA`, `LIMIT_EXCEEDED`,
+`UNSUPPORTED_FORMAT`. Both mirror the rest of this repository's
+stable-code convention (`financial.Code`, `reconciliation.CheckCode`,
+`adjustments.Type`) rather than requiring callers to parse human-readable
+strings.
+
+**Deterministic row IDs.** Every `Row.ID` is shaped `sheet-<index>-row-<n>`
+(0-based sheet index, 0-based row index as it appeared in the source) —
+stable within a single parse, never a UUID, and never renumbered around
+skipped blank rows. A future application attaching persistent database IDs
+does so on top of this, not instead of it.
+
+**Integration with classification.** `Result.ToRawLineItems()` converts
+every non-heading, non-blank row into a `financial.RawLineItem`, ready for
+`classification.ClassifyBatch` exactly as shown in the diagram above; see
+[`ingestion/integration_test.go`](ingestion/integration_test.go) for the
+full chain exercised against real fixtures, through
+`financial.Normalize`, and (for the balance sheet fixture) into
+`financial/reconciliation`.
+
+**Fixture corpus** (`ingestion/fixtures`): a QuickBooks-style P&L
+(`quickbooks_pl.csv`, nested Income/COGS/Expense sections with a Gross
+Profit subtotal), an accountant-custom multi-period P&L
+(`accountant_custom_pl.csv`, FY2024/FY2025 columns, parenthetical negative
+interest expense), a balance sheet (`balance_sheet.csv`, nested
+current/fixed asset and liability sections), a four-year SaaS P&L
+(`multi_year_saas_pl.csv`), a fixture exercising every malformed-numeric
+case at once (`malformed_numeric_values.csv`), a fixture with sparse/blank
+separator rows throughout (`sparse_blank_rows.csv`), a three-sheet XLSX
+workbook exercising auto-selection (`multi_sheet_workbook.xlsx`: a
+low-plausibility "Notes" sheet plus Income Statement and Balance Sheet
+sheets), a deliberately ambiguous two-sheet XLSX workbook
+(`ambiguous_workbook.xlsx`), and an XLSX workbook exercising nested
+totals/subtotals with indentation (`totals_subtotals.xlsx`). No proprietary
+or customer data is used anywhere in the corpus.
+
+**Explicit non-goals**, matching this repository's constraints exactly:
+no PDF parsing, no OCR, no LLM/AI interpretation or ML classification
+(statement-type/period/structural detection are 100% rule-based, same as
+`financial/classification`), no database persistence, no file-upload HTTP
+endpoints, no frontend, no QuickBooks/Xero API integration, no automatic
+add-back/adjustment recommendations, no external financial-data sources.
 
 ### `financial`
 
@@ -2137,8 +2423,9 @@ With `financial`, `financial/classification`, `financial/reconciliation`,
 `financial/metrics`, `financial/adjustments`, `financial/earnings`,
 `valuation` (and its five method subpackages), `valuation/basis`,
 `valuation/profile`, `valuation/applicability`, `valuation/orchestrator`,
-`valuation/consensus`, `valuation/sensitivity`, `valuation/report`, and
-`settings` all in place, **the deterministic valuation core described in
+`valuation/consensus`, `valuation/sensitivity`, `valuation/report`,
+`settings`, and now `ingestion` (`ingestion/csv`, `ingestion/xlsx`) all in
+place, **the deterministic valuation core described in
 this README is now complete and contract-frozen**: every method produces a
 version-stamped `Result`; applicability scores which methods suit a given
 business with a full explanation trail; the orchestrator runs a selected
@@ -2169,11 +2456,15 @@ The next steps are integration, not new packages:
    historical records tied to its own account/client/valuation entities.
    This repository defines the shapes; it does not decide how they're
    stored.
-2. **Document parsing.** Turning a real trial balance, QuickBooks export,
-   or PDF financial statement into `[]financial.RawLineItem` is exactly the
-   kind of OCR/document-understanding problem this repository's "no
-   PDF/OCR" constraint rules out — that's a separate ingestion layer that
-   produces this repository's actual input.
+2. **Document parsing.** CSV/XLSX tabular ingestion is now covered by
+   `ingestion` (see [`ingestion`](#ingestion) above). Turning a scanned or
+   born-digital **PDF** financial statement into `[]financial.RawLineItem`
+   is still exactly the kind of OCR/document-understanding problem this
+   repository's "no PDF/OCR" constraint rules out — see
+   [Known deterministic ingestion gaps](#known-deterministic-ingestion-gaps)
+   and the recommendation immediately below for why PDF is the natural
+   next adapter once it's needed, and why it's deliberately not started
+   here.
 3. **HTTP/API and UI.** `report.Report` is JSON-serializable specifically
    so a future API handler can return it directly and a future Vue UI (or
    any other frontend) can render it — building either is explicitly out
@@ -2307,3 +2598,78 @@ package (or the integration layer above) to address:**
   operating cash flow but end-of-year for a known one-time terminal
   transaction) is not supported and would need a per-period override this
   package's `Input` does not currently expose.
+
+### Known deterministic ingestion gaps
+
+Real-world tabular financial exports are wildly inconsistent, so
+`ingestion`'s deterministic rules — like every other detection heuristic in
+this repository — trade some recall for the guarantee that a match is
+always explainable and never fabricated. Known gaps, left for a future
+revision or for a caller-side override (`Options.LabelColumnOverride`,
+`HeaderRowOverride`, `PeriodColumnOverrides`, `StatementTypeOverride`) to
+handle in the meantime:
+
+- **`ingestion`'s own structural read (`Row.Kind`/`Row.Status`) is not
+  binding on `financial/classification`.** `financial.RawLineItem` has no
+  field for ingestion's subtotal/total/heading determination to travel on,
+  so `ToRawLineItems()` only uses it to decide which rows to include/
+  exclude; `classification.Classify` re-derives structural status from the
+  label text independently once the row reaches it (see the `ingestion`
+  section above). The two mostly agree because both use a "total"/
+  "subtotal"/"net"-token heuristic, but not always — `"Gross Profit"` is a
+  documented example where ingestion's broader label-shape detection
+  recognizes a subtotal that classification's narrower token check does
+  not. A future revision could add a `RawLineItem.HintStatus` (or similar)
+  optional field that classification's structural stage consults before
+  falling back to its own detection, closing this gap without either
+  package needing to duplicate the other's rules.
+- **Indentation-based parent/section detection depends on the source
+  preserving leading whitespace**, which plain CSV frequently does not
+  (many spreadsheet-to-CSV exporters strip it) while XLSX cell text
+  usually does. A CSV export with no indentation still gets a `ParentLabel`
+  from heading rows, but nested sub-sections within a single indent level
+  cannot be distinguished from each other by indentation alone in that
+  case.
+- **Header/period detection scans only the first 15 non-blank rows**
+  (`headerScanLimit`) before giving up. A statement with an unusually long
+  cover-page/title block ahead of its real header row would need
+  `Options.HeaderRowOverride`.
+- **Numeric parsing assumes North American formatting** (`,` thousands
+  separator, `.` decimal point) per `Options.Locale`'s current single
+  supported value, `LocaleEnUS`. A European-formatted export (`.`
+  thousands, `,` decimal) would need a new `Locale` value and its own
+  numeric-parsing rules — deliberately not built until there's a concrete
+  need, per this repository's general "don't build for hypothetical
+  requirements" discipline.
+- **Multi-row (wrapped) headers are not supported** — a header spanning
+  two physical rows (e.g. a merged-cell "2024" above a second row reading
+  "Actual"/"Budget") is read as two independent candidate header rows, not
+  combined into one composite period label.
+- **XLSX cell styling (bold, fill color, cell borders) is not read as a
+  structural signal**, even though the ingestion contract's structural-
+  detection section lists it as a possible signal alongside label text and
+  blank-value patterns. Label-shape detection alone (starts with "Total",
+  has no numeric values, etc.) has proven sufficient for every fixture in
+  the corpus so far; adding style-based detection would mean threading
+  excelize style lookups through `ingestion/internal/tabular`, which
+  currently has zero XLSX-specific knowledge by design.
+
+## Recommended next adapter
+
+With CSV and XLSX both covered, the next natural input adapter — and the
+one every remaining realistic financial-statement source funnels through —
+is **PDF**, explicitly out of scope for this repository per
+[What this project intentionally does not contain](#what-this-project-intentionally-does-not-contain):
+a born-digital PDF (text layer already present) is a fundamentally
+different, much harder extraction problem than CSV/XLSX (no reliable
+row/column grid to begin from at all — layout must be reconstructed from
+absolute-positioned text runs), and a scanned PDF requires OCR, which
+introduces exactly the non-deterministic, model-based uncertainty this
+repository's entire design has been structured to avoid. Should a future
+module take this on, it should preserve the same boundary `ingestion`
+established here: PDF-specific extraction stays isolated in its own
+package (e.g. `ingestion/pdf`), produces the same `ingestion.Result`/
+`Row`/`Cell` shapes this package already defines rather than a competing
+model, and still performs zero classification of its own — every row it
+extracts flows into the exact same `financial/classification` boundary
+CSV and XLSX rows do today.
