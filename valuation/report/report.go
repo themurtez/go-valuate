@@ -25,10 +25,24 @@ import (
 	"github.com/themurtez/go-valuate/valuation/consensus"
 )
 
+// SchemaVersion identifies this package's fixed Report shape (every
+// section/field Build populates). Bump this whenever a field is added,
+// removed, renamed, or reinterpreted in a way that could make a
+// historically persisted Report not deserialize/interpret identically
+// under the new code — see the repository README's versioning-strategy
+// section. Distinct from any upstream package's own version (e.g.
+// consensus.FormulaVersion, a method's MethodVersion): SchemaVersion
+// versions only this package's own reshaping/presentation layer.
+const SchemaVersion = "1.0.0"
+
 // Report is the complete presentation-neutral valuation report: every
 // section a future UI, API response, or export would need, assembled from
 // upstream package outputs by Build.
 type Report struct {
+	// SchemaVersion identifies which version of this package's Report
+	// shape produced this value — see the SchemaVersion constant's doc
+	// comment.
+	SchemaVersion string `json:"schema_version"`
 	// Summary is the top-of-report consensus/range overview.
 	Summary Summary `json:"summary"`
 	// Financial is the historical financial summary (revenue, EBITDA, SDE,

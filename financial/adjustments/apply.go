@@ -75,11 +75,24 @@ type Bridge struct {
 	NormalizedValue float64 `json:"normalized_value"`
 }
 
+// SemanticsVersion identifies this package's fixed adjustment semantics:
+// the default Targets/Effect table (see LookupType), the bridge formulas
+// (Reported/Calculated metric plus confirmed adjustments), and the
+// owner-compensation double-counting rule. Bump this whenever any of that
+// changes in a way that could make a historical Result not reproduce
+// identically under the new code — see the repository README's
+// versioning-strategy section.
+const SemanticsVersion = "1.0.0"
+
 // Result is the output of Apply: the original metrics.Snapshot, both
 // bridges, every adjustment that was skipped (across either bridge) with
 // its reason, and any warnings surfaced during application (e.g. from
 // Validate).
 type Result struct {
+	// SemanticsVersion identifies which version of this package's fixed
+	// adjustment semantics produced this Result — see the
+	// SemanticsVersion constant's doc comment.
+	SemanticsVersion string `json:"semantics_version"`
 	// Period is the period Apply was run for.
 	Period string `json:"period"`
 	// OriginalSnapshot is the unmodified metrics.Snapshot Apply was given.
@@ -137,7 +150,7 @@ type Result struct {
 func Apply(snapshot metrics.Snapshot, adjs []Adjustment) Result {
 	issues := Validate(adjs, snapshot)
 	invalidIDs := make(map[ID]bool)
-	result := Result{Period: string(snapshot.Period), OriginalSnapshot: snapshot}
+	result := Result{SemanticsVersion: SemanticsVersion, Period: string(snapshot.Period), OriginalSnapshot: snapshot}
 	for _, iss := range issues {
 		if iss.Severity == SeverityError {
 			result.Errors = append(result.Errors, iss)

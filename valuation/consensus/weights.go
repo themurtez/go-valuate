@@ -1,6 +1,10 @@
 package consensus
 
-import "math"
+import (
+	"math"
+
+	"github.com/themurtez/go-valuate/valuation"
+)
 
 // ValidateWeights checks every Input's Weight for use in a weighted mean,
 // and returns the normalized weight to use for each (in the same order as
@@ -38,20 +42,29 @@ import "math"
 // Normalizing by the actual sum is always mathematically correct and
 // removes an entire class of "my weights summed to 99.9, is that OK?"
 // caller error.
-func ValidateWeights(inputs []Input) (normalized []float64, ok bool, errs []string) {
+func ValidateWeights(inputs []Input) (normalized []float64, ok bool, errs []valuation.Issue) {
 	if len(inputs) == 0 {
-		return nil, false, []string{"no inputs supplied"}
+		return nil, false, []valuation.Issue{{
+			Code: valuation.IssueMissingRequiredData, Severity: valuation.SeverityError,
+			Message: "no inputs supplied",
+		}}
 	}
 
 	sum := 0.0
 	for _, in := range inputs {
 		w := in.Weight
 		if math.IsNaN(w) || math.IsInf(w, 0) {
-			errs = append(errs, "weight for method "+string(in.Method)+" is not a finite number")
+			errs = append(errs, valuation.Issue{
+				Code: valuation.IssueInvalidWeight, Severity: valuation.SeverityError,
+				Message: "weight for method " + string(in.Method) + " is not a finite number",
+			})
 			continue
 		}
 		if w < 0 {
-			errs = append(errs, "weight for method "+string(in.Method)+" is negative; negative weights are not usable for a weighted mean")
+			errs = append(errs, valuation.Issue{
+				Code: valuation.IssueInvalidWeight, Severity: valuation.SeverityError,
+				Message: "weight for method " + string(in.Method) + " is negative; negative weights are not usable for a weighted mean",
+			})
 			continue
 		}
 		sum += w
@@ -60,7 +73,10 @@ func ValidateWeights(inputs []Input) (normalized []float64, ok bool, errs []stri
 		return nil, false, errs
 	}
 	if sum <= 0 {
-		return nil, false, []string{"weights sum to zero; cannot compute a weighted mean (supply at least one positive weight)"}
+		return nil, false, []valuation.Issue{{
+			Code: valuation.IssueInvalidWeight, Severity: valuation.SeverityError,
+			Message: "weights sum to zero; cannot compute a weighted mean (supply at least one positive weight)",
+		}}
 	}
 
 	normalized = make([]float64, len(inputs))

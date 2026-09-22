@@ -368,3 +368,26 @@ func TestCalculate_NonFiniteInputsRejected(t *testing.T) {
 		}
 	}
 }
+
+func TestCalculate_ResultEnvelopeIsValid(t *testing.T) {
+	res := Calculate(Input{
+		ForecastPeriods:    []ForecastPeriod{{Period: "Y1", FreeCashFlow: 100000}, {Period: "Y2", FreeCashFlow: 110000}},
+		DiscountRate:       0.15,
+		TerminalGrowthRate: 0.03,
+	})
+	if issues := valuation.ValidateResultEnvelope(res.Method, res.MethodVersion, res.ValueType); len(issues) != 0 {
+		t.Errorf("ValidateResultEnvelope() = %+v, want no issues", issues)
+	}
+	if issues := valuation.ValidateFiniteSteps(res.Steps); len(issues) != 0 {
+		t.Errorf("ValidateFiniteSteps() = %+v, want no issues", issues)
+	}
+	if res.Method != Code {
+		t.Errorf("Method = %v, want %v", res.Method, Code)
+	}
+	if res.MethodVersion != Version {
+		t.Errorf("MethodVersion = %v, want %v", res.MethodVersion, Version)
+	}
+	if res.ValueType != valuation.ValueTypeEnterprise {
+		t.Errorf("ValueType = %v, want %v", res.ValueType, valuation.ValueTypeEnterprise)
+	}
+}

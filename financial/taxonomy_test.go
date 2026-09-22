@@ -61,3 +61,61 @@ func TestCodesByCategory(t *testing.T) {
 		}
 	}
 }
+
+// allDeclaredCodes lists every Code-typed exported constant declared in
+// taxonomy.go, hand-maintained so a code that's declared but never added
+// to buildCodeRegistry's entries slice is caught — TestAllCodes_NoDuplicatesAndStableCount
+// alone only proves the registry has no internal duplicates, not that
+// every declared constant made it into the registry at all.
+var allDeclaredCodes = []Code{
+	CodeRevProduct, CodeRevService, CodeRevRecurring, CodeRevOther,
+	CodeCogsMaterial, CodeCogsDirectLabor, CodeCogsFreight, CodeCogsOther,
+	CodeOpexPayroll, CodeOpexOwnerComp, CodeOpexRent, CodeOpexMarketing,
+	CodeOpexInsurance, CodeOpexUtilities, CodeOpexSoftware, CodeOpexProfessionalFees,
+	CodeOpexRepairs, CodeOpexVehicle, CodeOpexTravel, CodeOpexOffice, CodeOpexOther,
+	CodeDepreciation, CodeAmortization, CodeInterestExpense, CodeInterestIncome,
+	CodeIncomeTax, CodeOtherIncome, CodeOtherExpense,
+	CodeBsCash, CodeBsAccountsReceivable, CodeBsInventory, CodeBsPrepaid,
+	CodeBsCurrentAssetOther, CodeBsFixedAssets, CodeBsAccumDepreciation,
+	CodeBsIntangibleAssets, CodeBsGoodwill, CodeBsAccountsPayable,
+	CodeBsCurrentLiabilityOther, CodeBsShortTermDebt, CodeBsLongTermDebt,
+	CodeBsRetainedEarnings, CodeBsOwnerEquity,
+}
+
+func TestTaxonomy_EveryDeclaredConstantIsRegistered(t *testing.T) {
+	if len(allDeclaredCodes) != len(AllCodes()) {
+		t.Fatalf("allDeclaredCodes has %d entries but AllCodes() returns %d; a declared Code constant may be missing from buildCodeRegistry, or this test's list is stale", len(allDeclaredCodes), len(AllCodes()))
+	}
+	for _, code := range allDeclaredCodes {
+		if !IsValidCode(code) {
+			t.Errorf("declared constant %s is not registered in codeRegistry", code)
+		}
+	}
+}
+
+func TestTaxonomy_EveryCodeHasValidMetadata(t *testing.T) {
+	validCategories := map[CodeCategory]bool{
+		CategoryRevenue: true, CategoryCogs: true, CategoryOpex: true,
+		CategoryOtherIncomeStatement: true, CategoryBalanceSheet: true,
+	}
+	validStatements := map[StatementType]bool{
+		StatementIncomeStatement: true, StatementBalanceSheet: true, StatementCashFlow: true,
+	}
+	for _, meta := range AllCodes() {
+		if meta.Label == "" {
+			t.Errorf("%s: empty Label", meta.Code)
+		}
+		if !validCategories[meta.Category] {
+			t.Errorf("%s: invalid Category %q", meta.Code, meta.Category)
+		}
+		if !validStatements[meta.StatementType] {
+			t.Errorf("%s: invalid StatementType %q", meta.Code, meta.StatementType)
+		}
+	}
+}
+
+func TestTaxonomyVersion_NotEmpty(t *testing.T) {
+	if TaxonomyVersion == "" {
+		t.Error("TaxonomyVersion constant must not be empty")
+	}
+}

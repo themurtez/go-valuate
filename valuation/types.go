@@ -114,6 +114,68 @@ const (
 	// IssueNonFiniteInput means a numeric input field was NaN or +/-Inf.
 	// Common to every method that takes caller-supplied numeric inputs.
 	IssueNonFiniteInput IssueCode = "NON_FINITE_INPUT"
+
+	// The codes below are the shared, stable error taxonomy every package
+	// in this repository is expected to draw from when it has a genuine
+	// caller-facing failure mode to report (see ValidateResultEnvelope's
+	// doc comment and the repository README's "Error taxonomy" section).
+	// They exist so a future consuming application can map a domain
+	// failure to a UI/API response by code, without parsing message
+	// strings. This is deliberately a small, flat set — new codes are
+	// added only when an existing one does not already fit, never
+	// duplicated per package for the same underlying problem.
+
+	// IssueInvalidInput means a caller-supplied value was structurally
+	// invalid in a way not covered by a more specific code below (e.g. an
+	// empty required identifier, an out-of-range enum value).
+	IssueInvalidInput IssueCode = "INVALID_INPUT"
+	// IssueMissingRequiredData means a calculation could not proceed
+	// because a required input was entirely absent (e.g. no method
+	// results were supplied to a consensus calculation) — distinct from
+	// IssueInvalidInput, which means something was supplied but was
+	// invalid.
+	IssueMissingRequiredData IssueCode = "MISSING_REQUIRED_DATA"
+	// IssueIncompatibleValueBasis means two or more values that were
+	// meant to be combined (e.g. compared, averaged) carry different
+	// ValueTypes (enterprise/equity/asset) with no explicit, caller-
+	// requested conversion between them — see valuation/basis and
+	// valuation/consensus's Options.TargetBasis.
+	IssueIncompatibleValueBasis IssueCode = "INCOMPATIBLE_VALUE_BASIS"
+	// IssueInvalidRate means a caller-supplied rate (a discount rate, a
+	// capitalization rate, a growth rate, etc.) failed a method's
+	// validation rule for that rate (e.g. non-positive, or not above
+	// another related rate it must exceed).
+	IssueInvalidRate IssueCode = "INVALID_RATE"
+	// IssueInvalidWeight means a caller-supplied weight (e.g. a
+	// consensus method weight) was non-finite, negative, or otherwise
+	// unusable for the weighted calculation it was meant to feed.
+	IssueInvalidWeight IssueCode = "INVALID_WEIGHT"
+	// IssueUnavailableMetric means a calculation depended on a derived
+	// figure (e.g. a financial/metrics.MetricValue) that was Unavailable,
+	// so the dependent calculation could not proceed either.
+	IssueUnavailableMetric IssueCode = "UNAVAILABLE_METRIC"
+
+	// The codes below back ValidateResultEnvelope specifically — see its
+	// doc comment.
+
+	// IssueEmptyMethodCode means a Result's Method field was empty or not
+	// one of the known Code constants.
+	IssueEmptyMethodCode IssueCode = "EMPTY_METHOD_CODE"
+	// IssueEmptyVersion means a Result's MethodVersion field was empty.
+	IssueEmptyVersion IssueCode = "EMPTY_VERSION"
+	// IssueUnknownValueBasis means a Result's ValueType field was empty or
+	// not one of ValueTypeEnterprise/ValueTypeEquity/ValueTypeAsset.
+	IssueUnknownValueBasis IssueCode = "UNKNOWN_VALUE_BASIS"
+	// IssueNonFiniteStep means a Result's calculation trace (a Step,
+	// Bridge, or Component value) contained NaN or +/-Inf — a derived
+	// value produced during calculation, as opposed to IssueNonFiniteInput
+	// which flags a caller-supplied input.
+	IssueNonFiniteStep IssueCode = "NON_FINITE_STEP"
+	// IssueDuplicateMethodResult means the same method Code appeared more
+	// than once within a single set of results where that is not
+	// permitted (e.g. two Inputs in a single consensus.Calculate call
+	// both naming valuation.CodeEBITDAMultiple).
+	IssueDuplicateMethodResult IssueCode = "DUPLICATE_METHOD_RESULT"
 )
 
 // Issue is a single validation finding produced while checking a method's

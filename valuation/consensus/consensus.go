@@ -5,10 +5,8 @@
 // of (method, value) inputs.
 //
 // This package computes no valuation figures itself: every Value it
-// consumes is a headline figure (e.g. valuation/sde.Result.EquityValue,
-// or a Bridge.EquityValue when the caller has chosen to compare methods on
-// an equity basis — see the package doc comment on mixed value types
-// below) the caller has already produced via valuation/orchestrator or
+// consumes is a headline figure (e.g. valuation/sde.Result.EquityValue)
+// the caller has already produced via valuation/orchestrator or
 // individual method packages. It only combines already-produced numbers,
 // and does so with a single, explicit, documented set of formulas — see
 // Calculate's doc comment.
@@ -20,17 +18,37 @@
 // summarizing several independent method results. See DispersionScore's
 // doc comment for the same caveat applied to the agreement indicator.
 //
-// Mixed value types. This package does not itself enforce that every
-// Input has the same valuation.ValueType (enterprise/equity/asset) — a
-// caller comparing results across value types is responsible for bridging
-// them to a common basis first (see each method package's EquityBridge)
-// before calling Calculate, since averaging an enterprise value against
-// an equity value would silently misrepresent both. Input.ValueType is
-// carried through to Result so a caller/report can display or validate
-// this itself; see Result.MixedValueTypes.
+// Value basis. A consensus must never silently average an Enterprise
+// Value against an Equity Value against a net asset value. Every
+// Calculate call resolves to exactly one basis (Result.Basis) that every
+// included figure is expressed on:
+//
+//   - Options.TargetBasis explicit: every Input is converted to that basis
+//     via valuation/basis before any statistic is computed. An Input that
+//     cannot be converted (see valuation/basis.Convert's doc comment for
+//     exactly which basis pairs have no deterministic conversion) is
+//     excluded from Included/Statistics and reported in
+//     Result.BasisExclusions with a structured reason — never averaged in
+//     on its original, incompatible basis.
+//   - Options.TargetBasis left empty ("infer"): if every Input already
+//     shares one ValueType, that becomes Result.Basis and every Input is
+//     included as-is (Outcome OutcomeDirect for each, no conversion
+//     needed). If Inputs do not already share a basis, Calculate refuses
+//     to guess which one the caller meant: Result.Available is false and
+//     Result.Errors carries IssueIncompatibleValueBasis — this is the one
+//     case Calculate fails outright rather than computing a partial
+//     result, since there is no default basis to fall back to.
+//
+// Result.Conversions always lists every Input's outcome (Direct/
+// Converted/Excluded), in order, so a caller/report can show exactly how
+// each method's figure got to the basis actually used — see
+// valuation/basis.Conversion.
 package consensus
 
-import "github.com/themurtez/go-valuate/valuation"
+import (
+	"github.com/themurtez/go-valuate/valuation"
+	"github.com/themurtez/go-valuate/valuation/basis"
+)
 
 // Input is a single method's headline figure to include in a consensus
 // calculation, plus the weight to apply if a weighted mean is requested.
@@ -39,15 +57,33 @@ type Input struct {
 	Method valuation.Code `json:"method"`
 	// ValueType is the kind of value Value represents (enterprise, equity,
 	// or asset) — echoed from the source method's own Result.ValueType, not
-	// reinterpreted by this package. See the package doc comment on mixed
-	// value types.
+	// reinterpreted by this package. See the package doc comment on value
+	// basis.
 	ValueType valuation.ValueType `json:"value_type"`
-	// Value is the method's headline figure to include.
+	// Value is the method's headline figure to include, on ValueType's
+	// basis.
 	Value float64 `json:"value"`
 	// Weight is this method's caller-supplied importance weight, used only
 	// for WeightedMean. See Options.Weighting and ValidateWeights for how
 	// Weight is validated and normalized.
 	Weight float64 `json:"weight"`
+	// Bridge is the source method's own already-computed Enterprise-Value-
+	// to-Equity-Value bridge (echoing e.g. valuation/ebitda.Result.Bridge),
+	// if any — used only when Options.TargetBasis requires converting this
+	// Input's ValueTypeEnterprise value to equity. The zero Bridge
+	// (Available == false) means "no bridge available," matching every
+	// method package's own convention; see valuation/basis.Convert.
+	Bridge valuation.Bridge `json:"bridge,omitempty"`
+}
+
+// Options controls how Calculate combines its inputs.
+type Options struct {
+	// TargetBasis is the value basis every included Input must be
+	// expressed on before Calculate computes any statistic. Left empty,
+	// Calculate infers a basis only when every Input already shares one —
+	// see the package doc comment on value basis for the full rule,
+	// including the incompatible-basis failure case.
+	TargetBasis valuation.ValueType `json:"target_basis,omitempty"`
 }
 
 // DeviationEntry is one included method's Value expressed as a deviation
@@ -101,7 +137,10 @@ type Statistics struct {
 	// Count), not sample (Count-1), since every included method result is
 	// the complete set being summarized, not a sample drawn from a larger
 	// population — see CoefficientOfVariation's doc comment for how this
-	// feeds the dispersion score.
+	// feeds the dispersion score. Mathematically 0 when Count == 1 (a
+	// single value has nothing to differ from) — see
+	// CalculateDispersion's doc comment for why this reads as "dispersion
+	// is zero by definition," not "unavailable."
 	StdDev float64 `json:"std_dev"`
 	// CoefficientOfVariation is StdDev / |SimpleMean|, a scale-independent
 	// dispersion measure. Zero when SimpleMean is zero (see percentOf);
@@ -129,35 +168,73 @@ type Range struct {
 
 // Result is the output of Calculate.
 type Result struct {
-	// Included echoes every Input Calculate was given, in order, so a
-	// Result is self-contained.
+	// Requested echoes every Input Calculate was given, in original order
+	// and on each Input's own original ValueType/Value — never converted —
+	// so a Result is self-contained and a caller can always see exactly
+	// what was asked for, independent of what ended up usable.
+	Requested []Input `json:"requested"`
+	// Included is the subset of Requested that ended up expressed on
+	// Basis and actually fed into Statistics — every Value here is on
+	// Basis, in the same order as Requested with any BasisExclusions
+	// entries removed. Statistics, Range, and ValidateWeights are all
+	// computed over exactly this slice, so a caller re-deriving normalized
+	// weights (see valuation/report.BuildConsensusInputs) gets figures
+	// consistent with what Calculate itself used.
 	Included []Input `json:"included"`
-	// Available is false if Statistics could not be computed at all (no
-	// Input supplied) — see Calculate's doc comment. Every other field is
+	// Basis is the value basis every Value in Included is expressed on —
+	// either Options.TargetBasis (if set) or the single ValueType every
+	// Requested Input already shared (if Options.TargetBasis was left
+	// empty and inference succeeded). Empty when Available is false.
+	Basis valuation.ValueType `json:"basis,omitempty"`
+	// Conversions lists, for every Requested Input in order, what
+	// basis.Convert did with it — Direct (already on Basis), Converted
+	// (bridged or identity-converted to Basis), or Excluded (no
+	// deterministic conversion existed, see BasisExclusions). Always
+	// populated whenever Available is true, even when every Input was
+	// already on the same basis (all Direct) — so a caller/report can
+	// always show the full basis story, not just the excluded cases.
+	Conversions []basis.Conversion `json:"conversions,omitempty"`
+	// BasisExclusions is the subset of Conversions with Outcome ==
+	// basis.OutcomeExcluded — the methods that could not be expressed on
+	// Basis at all and were consequently left out of Included/Statistics.
+	// A structured, non-empty ExclusionReason accompanies every entry —
+	// see basis.Conversion. Never silently dropped without a trace: every
+	// exclusion here is also present in Conversions and explains why a
+	// method a caller may have expected to see in Included is absent.
+	BasisExclusions []basis.Conversion `json:"basis_exclusions,omitempty"`
+	// Available is false if Statistics could not be computed at all — no
+	// Input supplied, every Input excluded by basis conversion, or
+	// Options.TargetBasis was left empty and Requested did not already
+	// share one basis (see the package doc comment). Every other field is
 	// zero-value when Available is false.
 	Available bool `json:"available"`
-	// Statistics holds every descriptive measure. Meaningful only when
-	// Available is true.
+	// Statistics holds every descriptive measure, computed over Included.
+	// Meaningful only when Available is true.
 	Statistics Statistics `json:"statistics"`
-	// Range is the explicit method range (Min, Max). Meaningful only when
-	// Available is true.
+	// Range is the explicit method range (Min, Max) over Included.
+	// Meaningful only when Available is true.
 	Range Range `json:"range"`
-	// WeightsValid is true if every Input.Weight passed ValidateWeights and
-	// a WeightedMean was actually computed. False means WeightedMean and
-	// DeviationsFromWeightedMean are zero-value/empty — see Errors for why.
+	// WeightsValid is true if every Input.Weight in Included passed
+	// ValidateWeights and a WeightedMean was actually computed. False
+	// means WeightedMean and DeviationsFromWeightedMean are zero-value/
+	// empty — see Errors for why.
 	WeightsValid bool `json:"weights_valid"`
-	// MixedValueTypes is true if Included contains more than one distinct
-	// ValueType — a signal (not a blocking error) that the caller may be
-	// averaging incompatible bases (e.g. an enterprise value against an
-	// equity value) without an explicit bridge. See the package doc
-	// comment.
+	// MixedValueTypes is true if Requested contained more than one
+	// distinct ValueType before conversion — purely informational once
+	// Basis/Conversions exist (it no longer determines whether Calculate
+	// blocks or excludes anything by itself; see the package doc comment
+	// on value basis for what actually does).
 	MixedValueTypes bool `json:"mixed_value_types"`
-	// Dispersion is the derived agreement/dispersion indicator — see
-	// CalculateDispersion.
+	// Dispersion is the derived agreement/dispersion indicator, computed
+	// over Included — see CalculateDispersion.
 	Dispersion Dispersion `json:"dispersion"`
-	// Warnings carries non-blocking notes (e.g. MixedValueTypes, or a
-	// single-method Input where dispersion is not meaningful).
-	Warnings []string `json:"warnings,omitempty"`
+	// FormulaVersion identifies which version of this package's fixed
+	// formula set (see Calculate's doc comment) produced this Result —
+	// see the repository README's versioning-strategy section.
+	FormulaVersion string `json:"formula_version"`
+	// Warnings carries non-blocking notes (e.g. a single-method Input
+	// where dispersion is not meaningful by definition).
+	Warnings []valuation.Issue `json:"warnings,omitempty"`
 	// Errors carries the reason(s) Available or WeightsValid is false.
-	Errors []string `json:"errors,omitempty"`
+	Errors []valuation.Issue `json:"errors,omitempty"`
 }

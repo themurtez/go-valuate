@@ -8,10 +8,25 @@ import "sort"
 // labels and descriptions are metadata (see CodeMeta) and may change
 // independently of the code itself.
 //
+// Once released, a canonical Code's string value is a persistent API
+// identifier — treat it exactly like a stored primary key. An existing
+// code is never renamed or repurposed to mean something else; if a finer
+// distinction is later needed (see the repository README's taxonomy
+// section for the specific gaps evaluated and intentionally left as
+// coarse-grained), a new code is added alongside it instead. See
+// TaxonomyVersion.
+//
 // The taxonomy is currently a flat set of codes. It is designed so a later
 // version can introduce hierarchy (e.g. a Parent field in CodeMeta) without
 // changing the string value of any existing code.
 type Code string
+
+// TaxonomyVersion identifies the exact set of canonical codes and their
+// CodeMeta this file defines. Bump this only when a code is added (never
+// when one is merely relabeled — CodeMeta.Label can change freely without
+// a version bump, since Code's own string value is what downstream data
+// depends on) — see the repository README's versioning-strategy section.
+const TaxonomyVersion = "1.0.0"
 
 // Revenue codes.
 const (

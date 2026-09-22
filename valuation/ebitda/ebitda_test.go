@@ -192,3 +192,22 @@ func TestCalculate_BridgeNotComputedWhenBaseInputInvalid(t *testing.T) {
 		t.Errorf("bridge must not be computed when the base calculation is invalid, got %+v", res.Bridge)
 	}
 }
+
+func TestCalculate_ResultEnvelopeIsValid(t *testing.T) {
+	res := Calculate(Input{MaintainableEBITDA: 500000, Multiple: 3.5})
+	if issues := valuation.ValidateResultEnvelope(res.Method, res.MethodVersion, res.ValueType); len(issues) != 0 {
+		t.Errorf("ValidateResultEnvelope() = %+v, want no issues", issues)
+	}
+	if issues := valuation.ValidateFiniteSteps(res.Steps); len(issues) != 0 {
+		t.Errorf("ValidateFiniteSteps() = %+v, want no issues", issues)
+	}
+	if res.Method != Code {
+		t.Errorf("Method = %v, want %v", res.Method, Code)
+	}
+	if res.MethodVersion != Version {
+		t.Errorf("MethodVersion = %v, want %v", res.MethodVersion, Version)
+	}
+	if res.ValueType != valuation.ValueTypeEnterprise {
+		t.Errorf("ValueType = %v, want %v", res.ValueType, valuation.ValueTypeEnterprise)
+	}
+}

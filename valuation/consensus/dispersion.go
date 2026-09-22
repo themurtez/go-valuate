@@ -77,6 +77,19 @@ type Dispersion struct {
 // measure agreement over — callers should treat this the same as
 // Result.Available == false rather than reading it as "methods
 // disagreed."
+//
+// A single-value Statistics (Count == 1) is the opposite edge case:
+// StdDev and CoefficientOfVariation are mathematically 0 for any
+// one-element set (there is no other value to differ from), so Score is
+// exactly 100 and Level is LevelHighConsensus. This is "dispersion is
+// zero BY DEFINITION," not "dispersion is unavailable" or "not
+// meaningful" — a single included method cannot disagree with itself,
+// which is a genuinely different statement from "we don't know how much
+// the methods agree." Result.Warnings still flags the single-method case
+// (see Calculate), since a Score of 100 from one method carries far less
+// evidentiary weight than the same Score from several independently
+// agreeing methods — but the Score/Level themselves are not a special
+// case in the formula below.
 func CalculateDispersion(stats Statistics) Dispersion {
 	if stats.Count == 0 {
 		return Dispersion{}

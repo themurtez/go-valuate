@@ -1,8 +1,24 @@
 package settings
 
+// ResolutionSchemaVersion identifies the fixed shape of Resolution (which
+// fields/keys Resolve can populate — see numericFields/allMethods) and
+// Resolve's own precedence semantics. Bump this whenever a settings field
+// is added/removed, or precedence/unset-vs-explicit-zero behavior changes,
+// in a way that could make a historically persisted Resolution not
+// reproduce identically under the new code — see the repository README's
+// versioning-strategy section.
+const ResolutionSchemaVersion = "1.0.0"
+
 // Resolution is the outcome of resolving four scoped Settings layers into a
 // single effective set of values, along with which scope each resolved
-// value came from.
+// value came from. It is an immutable-style snapshot: Resolve returns a
+// freshly allocated Resolution with no aliasing back to the Settings
+// values it was built from (see Resolve's doc comment) — assembling it
+// once and passing it into a valuation run means later changes to
+// system/account/client/valuation defaults can never retroactively alter
+// a calculation that already captured this snapshot. See
+// resolver_test.go's TestResolve_LaterMutationOfSourceSettingsDoesNotAffectSnapshot
+// for this guarantee under direct test.
 //
 // Values holds resolved numeric fields keyed by field name (e.g.
 // "sde_multiple") and resolved method-enable flags keyed by
@@ -13,15 +29,26 @@ package settings
 // "never set anywhere."
 //
 // Sources holds, for each key present in Values, which Scope supplied the
-// winning value.
+// winning value — the source scope for every inherited/resolved value, as
+// a caller building an audit trail or a "why is this rate 0.15?" UI would
+// need.
 //
 // Both maps use plain Go types (float64, bool) rather than pointers, since
 // by the time a key is resolved into Values its unset/set ambiguity has
 // already been settled — a key's mere presence in the map is what signals
 // "was set."
+//
+// Resolution deliberately carries no database ID, user ID, account ID, or
+// any other identifier belonging to a consuming application — it is pure
+// resolved domain data, exactly like every other snapshot type in this
+// repository.
 type Resolution struct {
-	Values  map[string]any   `json:"values"`
-	Sources map[string]Scope `json:"sources"`
+	// SchemaVersion identifies which version of this package's Resolution
+	// shape produced this value — see the ResolutionSchemaVersion
+	// constant's doc comment.
+	SchemaVersion string           `json:"schema_version"`
+	Values        map[string]any   `json:"values"`
+	Sources       map[string]Scope `json:"sources"`
 }
 
 // FieldKey returns the Values/Sources key for a numeric settings field, for
@@ -67,8 +94,9 @@ func Resolve(system, account, client, valuation Settings) Resolution {
 	layers := []Settings{system, account, client, valuation}
 
 	result := Resolution{
-		Values:  make(map[string]any),
-		Sources: make(map[string]Scope),
+		SchemaVersion: ResolutionSchemaVersion,
+		Values:        make(map[string]any),
+		Sources:       make(map[string]Scope),
 	}
 
 	for _, field := range numericFields {

@@ -16,6 +16,61 @@ moved into a bigger Go application once they've proven out. Until then it
 stays self-contained on purpose: no database, no HTTP, no auth, nothing
 tying it to a particular product's infrastructure.
 
+## Architecture
+
+Every stage below is a pure function of the previous stage's output — no
+I/O, no shared mutable state, no hidden global config:
+
+```
+Raw financial rows
+        ↓
+Classification            (financial/classification)
+        ↓
+Mapped rows
+        ↓
+Normalization              (financial — Normalize)
+        ↓
+FinancialDataset
+        ↓
+Reconciliation + Metrics   (financial/reconciliation, financial/metrics)
+        ↓
+Adjustments                (financial/adjustments)
+        ↓
+Maintainable Earnings      (financial/earnings)
+        ↓
+Valuation Methods           (valuation/sde, ebitda, capitalization, dcf, netassets)
+        ↓
+Applicability / Orchestration (valuation/applicability, valuation/orchestrator)
+        ↓
+Common Value Basis          (valuation/basis)
+        ↓
+Consensus                   (valuation/consensus)
+        ↓
+Sensitivity                 (valuation/sensitivity)
+        ↓
+Report Model                 (valuation/report)
+```
+
+A separate, cross-cutting `settings` package supplies the hierarchical
+system/account/client/valuation rate/multiple/method-enable resolution
+(see [`settings`](#settings) below) that the orchestrator and individual
+methods consume; it has no fixed position in the pipeline above since a
+resolved `settings.Resolution` snapshot is assembled once, ahead of time,
+and handed into a run rather than looked up mid-calculation (see
+[Settings snapshot contract](#settings-snapshot-contract)).
+
+**What is deliberately absent from every stage above, and from this
+repository entirely:** no database, no HTTP/API layer, no AI/LLM, no
+document parsing (PDF/XLSX/CSV/OCR) — see
+[What this project intentionally does not contain](#what-this-project-intentionally-does-not-contain)
+below for the full list and the reasoning behind it. Every stage's output
+is plain, JSON-serializable Go structs; see
+[Value basis and conversion](#value-basis-and-conversion),
+[Versioning strategy](#versioning-strategy), and
+[Deterministic ordering guarantees](#deterministic-ordering-guarantees)
+below for the specific contracts a future integration layer can rely on
+without re-deriving them from source.
+
 ## What this project intentionally does not contain
 
 This is not an accident of scope — it's a design constraint. This repository
@@ -76,6 +131,14 @@ go-valuate/
   valuation/capitalization/   capitalization of earnings method
   valuation/dcf/               discounted cash flow method
   valuation/netassets/         adjusted net asset value method
+  valuation/basis/            explicit value-basis conversion (enterprise/equity/asset)
+  valuation/profile/          minimal business-description input to applicability
+  valuation/applicability/    deterministic method-fit scoring, with a full explanation trail
+  valuation/orchestrator/     runs a selected set of methods under a caller-chosen filter policy
+  valuation/consensus/        multi-method consensus/dispersion, computed on one value basis
+  valuation/sensitivity/      multiple/earnings/DCF-rate sensitivity grids
+  valuation/report/           presentation-neutral, JSON-serializable report model
+  valuation/e2e/               end-to-end fixture tests exercising the full pipeline
   settings/                  generic hierarchical settings resolver
   fixtures/                  example JSON matching the Go types, used by tests
                              as living documentation
@@ -122,9 +185,17 @@ and balance sheet accounts (see `taxonomy.go` for the full list — 43 codes in
 total).
 
 Codes are stable string identifiers meant to be persisted and relied upon
-long-term. Display labels and category groupings are kept as separate
+long-term — **once released, a canonical `Code` is a persistent API
+identifier, exactly like a stored primary key: never renamed, never
+repurposed.** Display labels and category groupings are kept as separate
 metadata (`CodeMeta`, looked up via `LookupCode`) specifically so that
 copy can be revised without ever changing a code's wire value.
+`financial.TaxonomyVersion` (see [Versioning strategy](#versioning-strategy)
+below) identifies the exact set of codes currently defined, bumped only
+when a code is added.
+[`financial/taxonomy_test.go`](financial/taxonomy_test.go) asserts the
+registry has no duplicate codes, every declared `Code` constant is
+registered, and every registered entry has valid metadata.
 
 The taxonomy is currently a flat namespace, but it's structured (one
 `CodeMeta` entry per code, keyed by a single stable string) so a hierarchical
@@ -943,6 +1014,104 @@ bridge was requested, distinct from a bridge that was requested and
 computed with every field at its legitimate zero value (e.g. a debt-free,
 cash-free business).
 
+#### Value basis and conversion
+
+A consensus across several valuation methods must never silently average
+an Enterprise Value against an Equity Value against an adjusted net asset
+value — three different quantities that happen to be denominated in the
+same currency. `valuation/basis` is a small, focused package built
+specifically to make that mixing impossible without an explicit,
+inspectable conversion step; `valuation/consensus.Calculate` uses it
+internally whenever a caller asks for a specific basis.
+
+```go
+type ConversionInput struct {
+    Method    valuation.Code
+    ValueType valuation.ValueType
+    Value     float64
+    Bridge    valuation.Bridge // the method's own already-computed bridge, if any
+}
+
+func Convert(in ConversionInput, target valuation.ValueType) Conversion
+func ConvertAll(inputs []ConversionInput, target valuation.ValueType) []Conversion
+```
+
+**Conversion rules — exactly three, no others invented:**
+
+1. **Same basis already** (`ValueType == target`): `OutcomeDirect`, the
+   value passes through unchanged.
+2. **Enterprise → Equity, with a bridge available**
+   (`in.Bridge.Available == true`): `OutcomeConverted`, using the exact
+   `Bridge.EquityValue` the source method itself already computed — never
+   recomputed here. Worked example, from an EBITDA-multiple result that
+   requested an equity bridge:
+
+   ```
+   EBITDA method:
+   Enterprise Value = 1,800,000
+   + Excess Cash      100,000
+   - Debt             300,000
+   ---------------------------
+   Equity Value     = 1,600,000
+   ```
+
+   A consensus requested on an equity basis uses `1,600,000`, never the
+   raw `1,800,000`.
+3. **Asset value → Equity value**: `OutcomeConverted` via an explicit
+   *identity* (`ConvertedValue == OriginalValue`), not a cash/debt bridge
+   — `Conversion.Bridge.Available` stays `false` for this case, so it's
+   never confused with rule 2's real bridge arithmetic. An adjusted net
+   asset value (`valuation/netassets`'s `Adjusted Assets - Adjusted
+   Liabilities`) and a balance-sheet-basis equity value are the same
+   subtraction; this rule only says that once a caller has *explicitly*
+   chosen an equity-basis comparison, this is the one defensible number to
+   use for a net-asset-value result — it does **not** mean adjusted net
+   asset value and a going-concern earnings-based equity value are
+   interchangeable in what they represent (see
+   [`valuation/netassets`](#valuationnetassets--adjusted-net-asset-value)'s
+   own section below for why its `ValueType` stays `ValueTypeAsset` rather
+   than being reclassified as `ValueTypeEquity`).
+
+**Everything else is `OutcomeExcluded`**, with a structured
+`ExclusionReason` — equity → enterprise, enterprise → equity with no
+bridge available, and asset → enterprise. No conversion is invented for
+these cases; a result excluded for the "no bridge available" reason can
+often be included on retry simply by supplying
+`EquityBridge.Requested = true` on that method's own `Input` upstream, so
+its `Result.Bridge` is populated the next time consensus is computed.
+
+**How `valuation/consensus` uses this:**
+
+```go
+c := consensus.Calculate(inputs, consensus.Options{
+    TargetBasis: valuation.ValueTypeEquity,
+})
+```
+
+- `Options.TargetBasis` left empty means "infer": if every `Input` already
+  shares one `ValueType`, that becomes `Result.Basis`; if they don't,
+  `Calculate` refuses to guess — `Result.Available` is `false` and
+  `Result.Errors` carries an `IssueIncompatibleValueBasis` entry, rather
+  than falling back to averaging raw incompatible values (the previous,
+  now-removed behavior).
+- With `TargetBasis` set, every `Input` goes through `basis.Convert`.
+  `Result.Included` holds only the successfully converted subset (on
+  `Result.Basis`) that `Statistics`/`Range`/`Dispersion` are actually
+  computed over. `Result.Conversions` lists every input's outcome, in
+  order, always populated; `Result.BasisExclusions` is the subset that
+  couldn't convert — never silently vanished, always paired with a reason.
+- `report.BuildConsensusInputs` populates each `consensus.Input.Bridge`
+  from the corresponding method's own `Result.Bridge` automatically (for
+  EBITDA/DCF), so a caller doesn't need to re-supply cash/debt figures a
+  second time just to enable basis conversion.
+
+**Not part of this mechanism:** `valuation/sde.EquityBridgeInput`/
+`Result.Bridge` is a different, narrower thing — an optional cash/debt
+adjustment applied *on top of* SDE's already-equity-value result "in case
+a caller's convention wants it" (see that package's own section below),
+not an Enterprise-Value-to-Equity-Value conversion. It is never consulted
+by `valuation/basis`.
+
 #### `valuation/sde` — SDE Multiple
 
 ```
@@ -1233,28 +1402,50 @@ Capitalization, DCF, NetAssets), each with `Score int` (0-100), `Level`,
 point contribution, positive or negative, with a fixed human-readable
 `Detail` — nothing is scored silently), and `Warnings []string`.
 
-**Scoring.** Every method starts at `baseScore = 50` (a neutral MEDIUM, so
-a wholly-empty `Profile` doesn't default to HIGH with zero evidence or LOW
-as if missing data were itself disqualifying). Rules then add or subtract
-fixed point deltas (`+25`/`+15`/`+8`/`-8`/`-15`/`-25`) based on `Profile`
-fields relevant to that method's conventional fit — e.g. SDE gains heavily
-for `OwnerOperated == true` and small revenue/headcount; EBITDA gains for
+**Scoring, and the full explanation trail.** Every method starts at
+`BaseScore = 50` (a neutral MEDIUM, so a wholly-empty `Profile` doesn't
+default to HIGH with zero evidence or LOW as if missing data were itself
+disqualifying). Rules then add or subtract fixed point deltas
+(`+25`/`+15`/`+8`/`-8`/`-15`/`-25`) based on `Profile` fields relevant to
+that method's conventional fit — e.g. SDE gains heavily for
+`OwnerOperated == true` and small revenue/headcount; EBITDA gains for
 `OwnerOperated == false` and larger revenue; Capitalization needs stable
 `EarningsStability`; NetAssets needs high `AssetIntensity` and an available
-balance sheet. The running total is clamped to `[0,100]` and mapped to a
-`Level` via fixed thresholds (80-100 HIGH, 50-79 MEDIUM, 1-49 LOW, 0
-NOT_APPLICABLE).
+balance sheet. `Result` exposes every intermediate a reviewer needs to
+reconstruct `Score` without reading source — `BaseScore`, `RawScore` (the
+pre-clamp total: `BaseScore` + every `Reason.Points`), `Score` (`RawScore`
+clamped to `[0,100]`), and `Clamped bool` (whether clamping actually
+changed the number) — matching this worked example exactly:
+
+```
+base score:                         50
+owner-operated service business:  +25
+low asset intensity:              +15
+stable positive earnings:         +15
+--------------------------------------
+raw score:                        105
+clamped score:                     100
+```
+
+`Score` is mapped to a `Level` via fixed thresholds (80-100 HIGH, 50-79
+MEDIUM, 1-49 LOW, 0 NOT_APPLICABLE).
 
 **DCF is the one hard-blocked method.** `valuation/dcf` never generates a
 forecast (see its own section below), so `scoreDCF` returns `Score: 0,
-Level: NOT_APPLICABLE` outright whenever
+Level: NOT_APPLICABLE` outright — with `HardBlockReason` set — whenever
 `Profile.DataAvailability.HasForecast` is false — a data-availability
 block, not a matter of degree — regardless of how well the business's
 growth profile would otherwise suit a DCF. **Revenue-multiple valuation is
 out of scope for this repository and is never invented here as a DCF
 substitute** for a growth company with weak current earnings; DCF is
 scored applicable only when the caller supplies (or intends to supply) an
-explicit forecast.
+explicit forecast. `HardBlockReason` is what distinguishes this genuine
+structural block from an ordinary low score reached by accumulating
+`Reason`s elsewhere: "this method cannot run at all without more data"
+(hard block, `HardBlockReason` non-empty) is a materially different
+message to show a reviewer than "this method could run, but scores poorly
+for this business" (a low but non-blocked `RawScore`, `HardBlockReason`
+empty).
 
 ```go
 r := applicability.Calculate(profile.Profile{
@@ -1286,24 +1477,45 @@ func Execute(req Request) Run
 ```
 
 `Request` carries a `settings.Resolution`, an optional
-`*applicability.Results` (+ `MinApplicabilityLevel` to opt into filtering
-low-scoring methods), and one optional `*Input` per method
-(`SDE *sde.Input`, `EBITDA *ebitda.Input`, etc. — `nil` means "don't run
-this method"). `Run.Methods` lists every method's `MethodOutcome`, in a
-fixed order (SDE, EBITDA, Capitalization, DCF, NetAssets), each carrying
-the method's own strongly-typed `*Result` pointer (not an `any`) when it
-ran, plus `Successful()`/`Excluded()`/`Unavailable()` convenience filters
-and a flattened `Warnings []MethodWarning` across every method.
+`*applicability.Results` (+ `FilterPolicy` to choose how applicability
+affects which methods run — see below), and one optional `*Input` per
+method (`SDE *sde.Input`, `EBITDA *ebitda.Input`, etc. — `nil` means
+"don't run this method"). `Run.Methods` lists every method's
+`MethodOutcome`, in a fixed order (SDE, EBITDA, Capitalization, DCF,
+NetAssets), each carrying the method's own strongly-typed `*Result`
+pointer (not an `any`) when it ran, plus
+`Successful()`/`Excluded()`/`Unavailable()` convenience filters and a
+flattened `Warnings []MethodWarning` across every method.
+
+**Applicability filtering policy.** The library never hard-codes a single
+product behavior for how a low applicability score affects whether a
+method runs — the caller chooses via `applicability.FilterPolicy`:
+
+```go
+const (
+    PolicyIncludeAllEnabled    FilterPolicy = "INCLUDE_ALL_ENABLED"    // the zero value: applicability is informational only
+    PolicyExcludeNotApplicable FilterPolicy = "EXCLUDE_NOT_APPLICABLE" // excludes only a hard block (Level == NOT_APPLICABLE)
+    PolicyMinimumLevel         FilterPolicy = "MINIMUM_LEVEL"          // excludes anything below Request.MinApplicabilityLevel
+    PolicyExplicitSelection    FilterPolicy = "EXPLICIT_METHOD_SELECTION" // only Request.SelectedMethods run, regardless of score
+)
+```
+
+`PolicyIncludeAllEnabled` (the zero value — a caller that never opts in
+gets this) means every settings-enabled method with a supplied `Input`
+runs regardless of score, `Applicability` remaining purely informational
+on every `MethodOutcome`. `MinApplicabilityLevel`/`SelectedMethods` are
+only consulted under their respective policy; ignored otherwise.
 
 **Evaluation order per method:** (1) explicitly disabled by
 `settings.Resolution` → `ExclusionDisabledBySettings`; (2) no `Input`
-supplied → `ExclusionNoInput`; (3) `MinApplicabilityLevel` set and the
-method's applicability `Level` ranks below it → `ExclusionLowApplicability`;
-(4) otherwise the method's own `Calculate` runs, and `Outcome` is
-`OutcomeSuccess`/`OutcomeUnavailable` from that `Result`'s own `Available`
-field — the orchestrator never re-derives or overrides it. A method with
-no explicit `method_enabled.<method>` entry anywhere in the `Resolution`
-defaults to **enabled**.
+supplied → `ExclusionNoInput`; (3) `Request.FilterPolicy` applied, if
+`Applicability` was supplied →
+`ExclusionNotApplicable`/`ExclusionLowApplicability`/`ExclusionNotSelected`
+depending on policy; (4) otherwise the method's own `Calculate` runs, and
+`Outcome` is `OutcomeSuccess`/`OutcomeUnavailable` from that `Result`'s own
+`Available` field — the orchestrator never re-derives or overrides it. A
+method with no explicit `method_enabled.<method>` entry anywhere in the
+`Resolution` defaults to **enabled**.
 
 ```
 SDE:        success
@@ -1315,7 +1527,9 @@ NetAssets:  excluded — no input supplied
 ### `valuation/consensus`
 
 Combines multiple included method results into descriptive statistics —
-never a claim about the business's "true" value.
+never a claim about the business's "true" value — over a single,
+explicit value basis (see [Value basis and conversion](#value-basis-and-conversion)
+above for the full mechanism this package builds on).
 
 ```go
 type Input struct {
@@ -1323,10 +1537,29 @@ type Input struct {
     ValueType valuation.ValueType
     Value     float64
     Weight    float64
+    Bridge    valuation.Bridge // the method's own bridge, for enterprise->equity conversion
 }
 
-func Calculate(inputs []Input) Result
+type Options struct {
+    TargetBasis valuation.ValueType // empty = infer only if every Input already shares one basis
+}
+
+func Calculate(inputs []Input, opts Options) Result
 ```
+
+**Value basis is resolved before any statistic is computed.** With
+`Options.TargetBasis` set, every `Input` is run through
+`valuation/basis.Convert`; `Result.Included` holds only the subset that
+converted successfully (on `Result.Basis`), and `Statistics`/`Range`/
+`Dispersion` are computed over exactly that subset — never over a raw mix
+of incompatible bases. With `TargetBasis` left empty, a basis is inferred
+only if every `Input` already shares one `ValueType`; if they don't,
+`Calculate` returns `Available: false` with an `IssueIncompatibleValueBasis`
+error rather than guessing. `Result.Conversions` lists every input's
+outcome (direct/converted/excluded), always populated;
+`Result.BasisExclusions` is the excluded subset, each with a structured
+reason — a method a caller expected to see in the consensus but that
+couldn't convert is never silently absent without explanation.
 
 `Result.Statistics` (`Statistics` struct) holds: `SimpleMean` ("Simple
 Consensus"), `WeightedMean` ("Weighted Consensus", meaningful only when
@@ -1337,9 +1570,10 @@ set being summarized, not a sample), `CoefficientOfVariation` (=
 `DeviationsFromWeightedMean` (each method's signed and percent deviation
 from the respective central figure). `Result.Range` is the explicit
 `{Min, Max}` method range — **this package invents no narrower "likely
-range."** `Result.MixedValueTypes` warns (never blocks) when `Included`
-mixes `enterprise_value`/`equity_value`/`asset_value` results without an
-explicit bridge.
+range."** `Result.MixedValueTypes` echoes whether `Requested` carried more
+than one `ValueType` *before* conversion — purely informational once
+`Basis`/`Conversions` exist; it no longer determines blocking/exclusion
+behavior by itself.
 
 **Formulas:**
 
@@ -1399,6 +1633,25 @@ const (
 **This is a fixed, documented heuristic transformation for human-facing
 display — not an industry-standard statistic**, and not a probability that
 the methods "agree" in any statistical sense.
+
+**Single-method consensus.** A `Result` with exactly one `Included` value
+is still `Available` — dispersion reads as `Score: 100` (`CV == 0`,
+mathematically, since a single value has nothing to differ from), meaning
+**dispersion is zero by definition**, not "unavailable" or "not
+meaningful." `Result.Warnings` still flags the single-method case
+separately, since a Score of 100 from one method carries far less
+evidentiary weight than the same Score from several independently
+agreeing methods — but the Score/Level themselves follow the same formula
+as any other count.
+
+**Error taxonomy.** `Result.Errors`/`Result.Warnings` are
+`[]valuation.Issue` (the same stable-code type every individual method
+package uses — see [Error taxonomy](#error-taxonomy) below), not freeform
+strings: `IssueIncompatibleValueBasis`, `IssueInvalidWeight`,
+`IssueMissingRequiredData`, and `IssueDuplicateMethodResult` (a warning —
+the same `valuation.Code` appearing more than once in `Included`, which
+would otherwise silently overweight that method in every mean/dispersion
+figure) are the codes this package produces.
 
 ### `valuation/sensitivity`
 
@@ -1550,6 +1803,27 @@ Exported surface:
 `Resolve` does not persist anything and holds no state between calls. The
 `Resolution` it returns is meant to be used immediately, and is a plain,
 JSON-compatible value the caller can snapshot however it likes.
+
+#### Settings snapshot contract
+
+`Resolution` is an immutable-style snapshot, suitable for passing directly
+into a valuation run instead of re-resolving settings during individual
+method calculations: `Resolve` returns a freshly allocated `Values`/
+`Sources` map pair with no aliasing back to the `Settings` values (or the
+`*float64`/`*bool` pointers inside them) it was built from — dereferencing
+happens once, at resolution time. Changing a system/account/client/
+valuation default afterward — including mutating the exact pointer a
+`Settings` field held — can never retroactively alter a `Resolution`
+already captured earlier; see
+`TestResolve_LaterMutationOfSourceSettingsDoesNotAffectSnapshot` in
+[`settings/resolver_test.go`](settings/resolver_test.go) for this under
+direct (in-memory, no database) test. `Resolution.SchemaVersion` (see
+[Versioning strategy](#versioning-strategy) below) identifies which
+version of this package's `Values`/`Sources` shape produced a given
+snapshot. `Resolution` carries no database ID, user ID, account ID, or any
+other identifier belonging to a consuming application — it is pure
+resolved domain data, exactly like every other snapshot type in this
+repository.
 
 #### Unset vs. explicit zero/false
 
@@ -1751,6 +2025,103 @@ dependency-free Go packages following the same input/output discipline —
 see [Recommended next module](#recommended-next-module) for the suggested
 next step.
 
+## Versioning strategy
+
+Every package whose output could later be persisted by a consuming
+application, and whose formulas/rules/semantics could reasonably change in
+a future edit, carries an explicit version constant — so that given an old
+persisted result, a future integration layer can always know which
+deterministic rules produced it, without guessing from a timestamp or a
+git commit. This directly extends the same guarantee the five valuation
+methods' `Version`/`MethodVersion` already established (see
+[Method codes and versions](#method-codes-and-versions) above: "Method
+versioning is mandatory because the main application is expected to
+persist historical valuations").
+
+| Version | Constant | Scope |
+|---|---|---|
+| Canonical taxonomy | `financial.TaxonomyVersion` | The fixed set of `financial.Code` values and their `CodeMeta` (`financial/taxonomy.go`) |
+| Classification rules | `classification.DefaultRulesVersion` | The built-in rule set `DefaultRules()` returns (`financial/classification`) — a caller's own custom `Config.Rules` versions independently |
+| Metrics formulas | `metrics.FormulaVersion`, echoed on `metrics.Result.FormulaVersion` | The fixed metric formula table (`financial/metrics`) |
+| Adjustment semantics | `adjustments.SemanticsVersion`, echoed on `adjustments.Result.SemanticsVersion` | The default Targets/Effect table and bridge formulas (`financial/adjustments`) |
+| Valuation method versions | `sde.Version` / `ebitda.Version` / `capitalization.Version` / `dcf.Version` / `netassets.Version`, each echoed as `Result.MethodVersion` | Each method's own formula and validation rules |
+| Applicability rules | `applicability.RulesVersion`, echoed on `applicability.Results.RulesVersion` | The fixed scoring rules (base score, point deltas, per-method thresholds) — versioned once per `Results` since all five methods score under the same rule set in a single `Calculate` call |
+| Consensus formula | `consensus.FormulaVersion`, echoed on `consensus.Result.FormulaVersion` | The fixed statistics/dispersion formula set (`valuation/consensus`) |
+| Report schema | `report.SchemaVersion`, echoed on `report.Report.SchemaVersion` | This package's own `Report` shape — distinct from any upstream package's version, which is separately echoed inside each section |
+| Settings resolution schema | `settings.ResolutionSchemaVersion`, echoed on `settings.Resolution.SchemaVersion` | The `Values`/`Sources` shape `Resolve` produces |
+
+**The rule for bumping a version:** whenever a formula, an availability/
+validation rule, a default, a sign convention, or an output shape changes
+in a way that could make a historical result not reproduce identically
+under the new code. A cosmetic change (a display label, a doc comment, a
+variable rename) never requires a bump. This is a small, coherent, flat
+scheme — one constant per package with a genuinely versionable concept,
+never sprinkled ad hoc, and never added merely for decoration.
+
+## Deterministic ordering guarantees
+
+Every collection this repository exposes to a caller has a documented,
+deterministic order — none rely on Go map iteration order (the two raw
+map fields that do exist, `settings.Resolution.Values`/`Sources` and
+`financial/metrics.Snapshot.Results`, are both string-keyed, so
+`encoding/json` sorts their keys alphabetically on marshal; both are
+covered by dedicated JSON-key-order tests rather than left as an
+unverified incidental property of the standard library).
+
+| Collection | Order |
+|---|---|
+| `financial.FinancialDataset.Items` | Sorted by `Code`, then by `Period` (produced by `Normalize`) |
+| `financial.FinancialDataset.Periods()` | Sorted lexically |
+| `financial/taxonomy.AllCodes()` / `CodesByCategory()` | Sorted by `Code` string |
+| `financial/metrics.Trend`'s `[]GrowthPoint`/`[]MarginPoint` series | Chronological, matching `Trend.FiscalYearsUsed` |
+| `financial/classification.Result.Alternatives` | Descending confidence (strongest candidate first) |
+| `financial/adjustments.Bridge.Applied` | The order adjustments were supplied to `Apply` |
+| `valuation/applicability.Results.Methods` | Fixed: SDE, EBITDA, Capitalization, DCF, NetAssets |
+| `valuation/orchestrator.Run.Methods` | Same fixed method order |
+| `valuation/consensus.Result.Requested` / `Included` / `Conversions` | `Requested` preserves caller order exactly; `Included` and `Conversions` preserve that same order (with excluded entries removed from `Included` only) |
+| `valuation/report.Report.Methods` | Same fixed method order (`methodOrder`, mirroring the orchestrator's) |
+
+## Error taxonomy
+
+Most packages in this repository do not return a Go `error` at all —
+invalidity is communicated through `Result.Available` plus structured
+`Result.Errors`/`Result.Warnings` (see each package's own section above).
+Where a package does surface structured problems, it uses one of two
+established, stable-code systems rather than a caller having to parse
+message strings:
+
+- **`valuation.Issue{Code valuation.IssueCode, Severity, Message}`** —
+  shared by every one of the five valuation methods (each defining its
+  own method-specific `IssueCode` constants, e.g. `sde.IssueNonPositiveMultiple`)
+  and by `valuation/consensus`. The common codes every package can draw
+  from: `IssueInvalidInput`, `IssueMissingRequiredData`,
+  `IssueIncompatibleValueBasis`, `IssueInvalidRate`, `IssueInvalidWeight`,
+  `IssueUnavailableMetric` — plus a handful backing
+  `valuation.ValidateResultEnvelope`/`ValidateFiniteSteps`'s own invariant
+  checks (`IssueEmptyMethodCode`, `IssueEmptyVersion`,
+  `IssueUnknownValueBasis`, `IssueNonFiniteStep`,
+  `IssueDuplicateMethodResult`).
+- **`adjustments.Issue{Code adjustments.IssueCode, Severity, Message}`** —
+  `financial/adjustments`' own separate, independently well-formed system
+  (`IssueMissingID`, `IssueDuplicateID`, `IssueAmbiguousEffect`, etc.),
+  intentionally not merged into `valuation.Issue`: the two packages'
+  problem domains don't overlap, and forcing one type to serve both would
+  either leak valuation-specific codes into `financial` or vice versa.
+
+Two structured-but-not-error-severity vocabularies exist alongside these
+and are not folded in, since they already serve the "stable, matchable"
+purpose this taxonomy is for: `orchestrator.ExclusionReason` (why a method
+never ran) and `applicability.Reason{Kind, Detail, Points}` (a scoring
+contribution, not a failure). A genuine `Normalize`-level structural
+failure (a malformed row) still returns a real Go `error`
+(`financial.ValidationErrors`, inspectable via `errors.As`) — that
+boundary is a true parse/validate failure, not a domain outcome a
+`Result.Available` flag can represent.
+
+This is deliberately a small, flat set of additions — not a new
+framework — sized to what a future consuming application actually needs
+to map a domain failure to a UI/API response by code.
+
 ## Development
 
 ```bash
@@ -1764,19 +2135,25 @@ go vet ./...
 
 With `financial`, `financial/classification`, `financial/reconciliation`,
 `financial/metrics`, `financial/adjustments`, `financial/earnings`,
-`valuation` (and its five method subpackages), `valuation/profile`,
-`valuation/applicability`, `valuation/orchestrator`, `valuation/consensus`,
-`valuation/sensitivity`, `valuation/report`, and `settings` all in place,
-**the deterministic valuation core described in this README is now
-complete**: every method produces a version-stamped `Result`; applicability
-scores which methods suit a given business; the orchestrator runs a
-selected set without one method's failure affecting another; consensus
-combines results into simple/weighted means, a range, and a dispersion
-indicator; sensitivity analysis explores multiples/earnings/DCF-rate grids;
-and the report package reshapes all of it into one presentation-neutral,
-JSON-serializable structure — see
-[`valuation/e2e/e2e_test.go`](valuation/e2e/e2e_test.go) for the full chain
-exercised end to end against a realistic fixture.
+`valuation` (and its five method subpackages), `valuation/basis`,
+`valuation/profile`, `valuation/applicability`, `valuation/orchestrator`,
+`valuation/consensus`, `valuation/sensitivity`, `valuation/report`, and
+`settings` all in place, **the deterministic valuation core described in
+this README is now complete and contract-frozen**: every method produces a
+version-stamped `Result`; applicability scores which methods suit a given
+business with a full explanation trail; the orchestrator runs a selected
+set under a caller-chosen filtering policy without one method's failure
+affecting another; consensus combines results into simple/weighted means, a
+range, and a dispersion indicator only after converting every included
+result onto one explicit, auditable value basis (see
+[Value basis and conversion](#value-basis-and-conversion)); sensitivity
+analysis explores multiples/earnings/DCF-rate grids; and the report package
+reshapes all of it into one presentation-neutral, JSON-serializable,
+version-stamped structure — see
+[`valuation/e2e/e2e_test.go`](valuation/e2e/e2e_test.go) and
+[`valuation/e2e/e2e_asset_heavy_test.go`](valuation/e2e/e2e_asset_heavy_test.go)
+for the full chain exercised end to end against two realistic fixtures (an
+owner-operated service business and an asset-heavy manufacturer).
 
 Nothing further can be added to this repository *as a deterministic
 module* without crossing into scope this repository has deliberately

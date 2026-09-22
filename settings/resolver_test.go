@@ -247,3 +247,66 @@ func TestResolve_ScopeFieldOnInputIsIgnoredForPrecedence(t *testing.T) {
 		t.Errorf("source = %v, want valuation", res.Sources[FieldKeyDiscountRate])
 	}
 }
+
+func TestResolve_LaterMutationOfSourceSettingsDoesNotAffectSnapshot(t *testing.T) {
+	// A Resolution is meant to be captured once and passed into a
+	// valuation run as an immutable-style snapshot. Changing
+	// system/account/client/valuation defaults later — including
+	// mutating the exact *float64/*bool pointer a Settings value held at
+	// resolution time, the more subtle aliasing hazard than merely
+	// building a new Settings — must never retroactively alter a
+	// Resolution already returned by an earlier Resolve call.
+	sdeMultiple := 2.5
+	discountRate := 0.15
+	methodEnabled := true
+
+	system := Settings{
+		SDEMultiple:   &sdeMultiple,
+		DiscountRate:  &discountRate,
+		MethodEnabled: map[Method]*bool{MethodSDE: &methodEnabled},
+	}
+
+	snapshot := Resolve(system, Settings{}, Settings{}, Settings{})
+
+	wantSDEMultiple := snapshot.Values[FieldKeySDEMultiple]
+	wantDiscountRate := snapshot.Values[FieldKeyDiscountRate]
+	wantMethodEnabled := snapshot.Values[MethodFieldKey(MethodSDE)]
+
+	// Mutate the underlying values the original Settings' pointers point
+	// to — this is the hazard a naive "just copy the struct" resolver
+	// would not protect against, since a shallow copy of *float64/*bool
+	// still points at the same backing value.
+	sdeMultiple = 9.9
+	discountRate = 0.99
+	methodEnabled = false
+
+	if snapshot.Values[FieldKeySDEMultiple] != wantSDEMultiple {
+		t.Errorf("snapshot sde_multiple changed after mutating the source pointer: got %v, want unchanged %v", snapshot.Values[FieldKeySDEMultiple], wantSDEMultiple)
+	}
+	if snapshot.Values[FieldKeyDiscountRate] != wantDiscountRate {
+		t.Errorf("snapshot discount_rate changed after mutating the source pointer: got %v, want unchanged %v", snapshot.Values[FieldKeyDiscountRate], wantDiscountRate)
+	}
+	if snapshot.Values[MethodFieldKey(MethodSDE)] != wantMethodEnabled {
+		t.Errorf("snapshot method_enabled.sde changed after mutating the source pointer: got %v, want unchanged %v", snapshot.Values[MethodFieldKey(MethodSDE)], wantMethodEnabled)
+	}
+
+	// Also confirm a later, independent Resolve call (representing a
+	// changed system/account/client default from that point forward) does
+	// not touch a Resolution already captured earlier — two separate
+	// snapshots in time, neither retroactively affecting the other.
+	changedSystem := Settings{SDEMultiple: Float64(7.0)}
+	_ = Resolve(changedSystem, Settings{}, Settings{}, Settings{})
+	if snapshot.Values[FieldKeySDEMultiple] != wantSDEMultiple {
+		t.Errorf("earlier snapshot changed after a later, unrelated Resolve call: got %v, want unchanged %v", snapshot.Values[FieldKeySDEMultiple], wantSDEMultiple)
+	}
+}
+
+func TestResolve_ResolutionCarriesSchemaVersion(t *testing.T) {
+	res := Resolve(Settings{}, Settings{}, Settings{}, Settings{})
+	if res.SchemaVersion != ResolutionSchemaVersion {
+		t.Errorf("Resolution.SchemaVersion = %q, want %q", res.SchemaVersion, ResolutionSchemaVersion)
+	}
+	if ResolutionSchemaVersion == "" {
+		t.Error("ResolutionSchemaVersion constant must not be empty")
+	}
+}

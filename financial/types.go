@@ -132,6 +132,11 @@ type FinancialDataset struct {
 	// Items are denominated in. Required and never empty.
 	Currency string `json:"currency"`
 	// Items is the flat set of normalized (code, period) aggregates.
+	// Deterministically sorted by Code, then by Period, whenever produced
+	// by Normalize — never relies on Go map iteration order. A caller
+	// constructing a FinancialDataset directly (e.g. deserializing one
+	// from storage) is responsible for preserving this order if it wants
+	// downstream comparisons/tests to remain stable.
 	Items []NormalizedItem `json:"items"`
 }
 

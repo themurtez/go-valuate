@@ -1,8 +1,8 @@
-// Package e2e contains a single, complete end-to-end deterministic fixture
-// exercising the whole pipeline this repository implements, front to back,
-// for one realistic small private business:
+// Package e2e contains complete end-to-end deterministic fixture tests
+// exercising the whole pipeline this repository implements, front to back:
 //
 //	normalized financial data
+//	-> financial/reconciliation (Run)
 //	-> financial/metrics (Calculate)
 //	-> financial/adjustments (Apply: normalized EBITDA/SDE bridges)
 //	-> financial/earnings (Calculate: maintainable earnings)
@@ -10,6 +10,7 @@
 //	   dcf, netassets)
 //	-> valuation/applicability (Calculate)
 //	-> valuation/orchestrator (Execute)
+//	-> valuation/basis (via valuation/consensus's Options.TargetBasis)
 //	-> valuation/consensus (Calculate)
 //	-> valuation/sensitivity (MultipleSensitivity, DCFSensitivity)
 //	-> valuation/report (Build)
@@ -17,10 +18,21 @@
 // No database, no AI, no PDF, no network I/O anywhere in this chain — every
 // stage is a pure function over the previous stage's output, using the
 // repository's existing fixtures (fixtures/normalized_hvac_multi_year.json,
+// fixtures/normalized_manufacturer_multi_year.json,
 // fixtures/adjustments_by_business_type.json,
-// fixtures/valuation_by_business_type.json) for a small owner-operated HVAC
-// service business, the same archetype used throughout this repository's
-// other fixture-based tests.
+// fixtures/valuation_by_business_type.json).
+//
+// Two archetypes are covered, deliberately chosen to exercise opposite ends
+// of this repository's applicability/value-basis logic:
+//
+//   - TestEndToEnd_HVAC — a small, owner-operated service business (SDE
+//     applicability HIGH, three years of adjustments feeding a
+//     simple-average maintainable-earnings strategy).
+//   - TestEndToEnd_Manufacturer — an asset-heavy, professionally-managed
+//     business (Adjusted Net Asset Value applicability HIGH/MEDIUM, a
+//     single year of adjustments feeding a latest-period strategy, and the
+//     asset_value -> equity_value identity conversion exercised in a real
+//     consensus rather than only in valuation/basis's own unit tests).
 //
 // This package lives outside financial/valuation's own directory trees
 // specifically because it is the one place allowed to import nearly every
@@ -37,6 +49,7 @@ import (
 	"github.com/themurtez/go-valuate/financial/adjustments"
 	"github.com/themurtez/go-valuate/financial/earnings"
 	"github.com/themurtez/go-valuate/financial/metrics"
+	"github.com/themurtez/go-valuate/financial/reconciliation"
 	"github.com/themurtez/go-valuate/valuation"
 	"github.com/themurtez/go-valuate/valuation/applicability"
 	"github.com/themurtez/go-valuate/valuation/capitalization"
@@ -162,6 +175,31 @@ func TestEndToEnd_HVAC(t *testing.T) {
 		t.Fatal("expected 2025 EBITDA and SDE to be available")
 	}
 
+	// 1b. financial/reconciliation: the same normalized dataset must be
+	// internally consistent — a hand-authored fixture's balance sheet
+	// balances by construction (see fixtures/normalized_hvac_multi_year.json's
+	// own doc comment), and the dataset must be structurally well-formed.
+	reconResult := reconciliation.Run(ds, reconciliation.Options{})
+	if reconResult.HasFailures() {
+		for _, check := range reconResult.Checks {
+			if check.Status == reconciliation.StatusFail {
+				t.Errorf("reconciliation check %s unexpectedly FAILed: %s", check.Code, check.Explanation)
+			}
+		}
+	}
+	var balanceCheckFound bool
+	for _, check := range reconResult.Checks {
+		if check.Code == reconciliation.CheckBalanceSheetBalances {
+			balanceCheckFound = true
+			if check.Status != reconciliation.StatusPass {
+				t.Errorf("expected %s to PASS for this fixture's by-construction balanced sheet, got %+v", reconciliation.CheckBalanceSheetBalances, check)
+			}
+		}
+	}
+	if !balanceCheckFound {
+		t.Errorf("expected a %s check to run for this dataset", reconciliation.CheckBalanceSheetBalances)
+	}
+
 	// 2. financial/adjustments: normalized EBITDA/SDE bridges for 2025.
 	adjs := loadAdjustments(t, "hvac")
 	adjResult := adjustments.Apply(snap2025, adjs)
@@ -270,7 +308,14 @@ func TestEndToEnd_HVAC(t *testing.T) {
 	if len(consensusInputs) != 5 {
 		t.Fatalf("expected 5 consensus inputs, got %d", len(consensusInputs))
 	}
-	consensusResult := consensus.Calculate(consensusInputs)
+	// All 5 methods' results carry different native value types (SDE/
+	// Capitalization equity, EBITDA/DCF enterprise, NetAssets asset).
+	// consensus.Calculate must never silently average these raw values —
+	// an explicit equity-basis TargetBasis converts every method onto one
+	// common basis first: EBITDA/DCF via their own already-computed equity
+	// bridges (the fixture requests both above), NetAssets via the
+	// documented asset-to-equity identity (see valuation/basis).
+	consensusResult := consensus.Calculate(consensusInputs, consensus.Options{TargetBasis: valuation.ValueTypeEquity})
 	if !consensusResult.Available {
 		t.Fatalf("expected consensus to be available: %+v", consensusResult.Errors)
 	}
@@ -280,12 +325,24 @@ func TestEndToEnd_HVAC(t *testing.T) {
 	if consensusResult.Statistics.SimpleMean <= 0 {
 		t.Errorf("expected a positive SimpleMean, got %v", consensusResult.Statistics.SimpleMean)
 	}
-	// Simple mean of 5 mixed enterprise/equity/asset values is a real,
-	// deliberately-flagged number here (see MixedValueTypes); the fixture's
-	// point is that the pipeline runs end to end, not that mixing value
-	// types is the recommended real-world usage.
+	if consensusResult.Basis != valuation.ValueTypeEquity {
+		t.Errorf("Basis = %v, want equity_value", consensusResult.Basis)
+	}
+	if len(consensusResult.Included) != 5 {
+		t.Fatalf("expected all 5 methods to convert successfully onto the equity basis, got %d included; conversions=%+v", len(consensusResult.Included), consensusResult.Conversions)
+	}
+	if len(consensusResult.BasisExclusions) != 0 {
+		t.Errorf("expected no basis exclusions when every method has a usable bridge or identity conversion, got %+v", consensusResult.BasisExclusions)
+	}
+	for _, c := range consensusResult.Conversions {
+		if c.Outcome == "excluded" {
+			t.Errorf("method %v was excluded from the equity-basis consensus: %s", c.Method, c.ExclusionReason)
+		}
+	}
+	// MixedValueTypes still reports the pre-conversion fact for
+	// transparency, even though every method successfully converted.
 	if !consensusResult.MixedValueTypes {
-		t.Error("expected MixedValueTypes = true (SDE/Capitalization are equity, EBITDA/DCF are enterprise, NetAssets is asset)")
+		t.Error("expected MixedValueTypes = true (SDE/Capitalization are equity, EBITDA/DCF are enterprise, NetAssets is asset, before conversion)")
 	}
 
 	// 8. valuation/sensitivity: multiple sensitivity over the SDE multiple,
@@ -372,10 +429,22 @@ func TestEndToEnd_HVAC(t *testing.T) {
 	}
 
 	// Final: the whole Report must serialize cleanly to JSON (no NaN/Inf,
-	// no unsupported types) — the deliverable a future API/UI/export
-	// pipeline actually consumes.
-	if _, err := json.Marshal(rep); err != nil {
+	// no unsupported types) and round-trip — the deliverable a future
+	// API/UI/export pipeline actually consumes and, eventually, reads back.
+	repJSON, err := json.Marshal(rep)
+	if err != nil {
 		t.Fatalf("report failed to serialize to JSON: %v", err)
+	}
+	var roundTripped report.Report
+	if err := json.Unmarshal(repJSON, &roundTripped); err != nil {
+		t.Fatalf("report failed to round-trip from JSON: %v", err)
+	}
+	repJSON2, err := json.Marshal(roundTripped)
+	if err != nil {
+		t.Fatalf("round-tripped report failed to re-serialize: %v", err)
+	}
+	if string(repJSON) != string(repJSON2) {
+		t.Fatal("report JSON did not round-trip byte-for-byte through marshal -> unmarshal -> marshal")
 	}
 }
 

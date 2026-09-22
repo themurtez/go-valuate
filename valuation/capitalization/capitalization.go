@@ -164,7 +164,27 @@ func Calculate(input Input) Result {
 	}
 	result.Errors = valuation.Errors(issues)
 	result.Warnings = valuation.Warnings(issues)
+	finalizeEnvelope(&result)
 	return result
+}
+
+// finalizeEnvelope runs the shared valuation.ValidateResultEnvelope/
+// ValidateFiniteSteps invariant checks (see their doc comments) against
+// an already-computed Result, appending any finding to Errors and
+// flipping Available to false — a successful Result must never carry an
+// unknown method/version/basis or a non-finite calculation step. In
+// today's code these checks never fire (Method/MethodVersion/ValueType
+// are hard-coded correctly above, and every Step is built from
+// already-finite validated inputs); they exist as a regression guard.
+func finalizeEnvelope(result *Result) {
+	issues := valuation.ValidateResultEnvelope(result.Method, result.MethodVersion, result.ValueType)
+	issues = append(issues, valuation.ValidateFiniteSteps(result.Steps)...)
+	if len(issues) == 0 {
+		return
+	}
+	result.Errors = append(result.Errors, issues...)
+	result.Available = false
+	result.EquityValue = 0
 }
 
 func isFinite(v float64) bool {

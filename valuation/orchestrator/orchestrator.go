@@ -54,11 +54,21 @@ const (
 	// method in Request (e.g. Request.DCF is nil) — the orchestrator never
 	// invents a default input.
 	ExclusionNoInput ExclusionReason = "no_input"
-	// ExclusionLowApplicability means an applicability.Results was
-	// supplied, Request.MinApplicabilityLevel was set above
-	// applicability.LevelNotApplicable, and this method's scored Level fell
-	// below it.
+	// ExclusionLowApplicability means Request.FilterPolicy was
+	// applicability.PolicyMinimumLevel and this method's scored Level fell
+	// below Request.MinApplicabilityLevel.
 	ExclusionLowApplicability ExclusionReason = "low_applicability"
+	// ExclusionNotApplicable means Request.FilterPolicy was
+	// applicability.PolicyExcludeNotApplicable and this method's scored
+	// Level was exactly applicability.LevelNotApplicable (a hard block —
+	// see applicability.Result.HardBlockReason) — distinct from
+	// ExclusionLowApplicability, which can exclude a method that scored
+	// low but was not itself blocked.
+	ExclusionNotApplicable ExclusionReason = "not_applicable"
+	// ExclusionNotSelected means Request.FilterPolicy was
+	// applicability.PolicyExplicitSelection and this method's Code was not
+	// present in Request.SelectedMethods.
+	ExclusionNotSelected ExclusionReason = "not_selected"
 )
 
 // MethodOutcome is one method's result from a single Run: exactly one of
@@ -109,18 +119,31 @@ type Request struct {
 	// zero-value Resolution (no method_enabled entries at all) means every
 	// method is enabled by default — see Run's doc comment.
 	Resolution settings.Resolution
-	// Applicability, if non-nil, is consulted for MinApplicabilityLevel
-	// filtering and is echoed on every MethodOutcome.Applicability
-	// regardless of whether filtering is active.
+	// Applicability, if non-nil, is consulted under FilterPolicy and is
+	// echoed on every MethodOutcome.Applicability regardless of whether
+	// filtering is active.
 	Applicability *applicability.Results
-	// MinApplicabilityLevel, if non-empty, excludes any method whose
-	// applicability.Result.Level is below this threshold (ordered
-	// NOT_APPLICABLE < LOW < MEDIUM < HIGH) — see levelRank. Ignored if
-	// Applicability is nil. Left empty (the zero value), no applicability
-	// filtering happens: a method runs whenever it is enabled and has an
-	// Input, regardless of its applicability score — applicability is
-	// informational only unless the caller explicitly opts into filtering.
+	// FilterPolicy selects how Applicability is used to decide which
+	// methods run — see the applicability.FilterPolicy constants for the
+	// full set. The zero value is applicability.PolicyIncludeAllEnabled:
+	// applicability is purely informational and every settings-enabled
+	// method with a supplied Input runs regardless of its score, exactly
+	// matching this package's original (pre-policy) behavior. Ignored
+	// entirely if Applicability is nil — there is nothing to filter by.
+	// The library never hard-codes a single filtering behavior; the caller
+	// chooses.
+	FilterPolicy applicability.FilterPolicy
+	// MinApplicabilityLevel is the threshold consulted only when
+	// FilterPolicy is applicability.PolicyMinimumLevel: any method whose
+	// applicability.Result.Level ranks below it (ordered NOT_APPLICABLE <
+	// LOW < MEDIUM < HIGH — see levelRank) is excluded with
+	// ExclusionLowApplicability. Ignored under every other FilterPolicy.
 	MinApplicabilityLevel applicability.Level
+	// SelectedMethods is consulted only when FilterPolicy is
+	// applicability.PolicyExplicitSelection: a method whose Code is not
+	// present here is excluded with ExclusionNotSelected, regardless of
+	// its applicability score. Ignored under every other FilterPolicy.
+	SelectedMethods []valuation.Code
 
 	// SDE is the caller-constructed input for the SDE multiple method. nil
 	// means "do not run this method."

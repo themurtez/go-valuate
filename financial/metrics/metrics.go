@@ -15,9 +15,24 @@ type Options struct {
 	PeriodMeta map[financial.Period]PeriodInfo
 }
 
+// FormulaVersion identifies this package's fixed metric formula set (the
+// exact formula table in the repository README's financial/metrics
+// section — TotalRevenue, GrossProfit, EBITDA, SDE, WorkingCapital, etc.).
+// Bump this whenever a formula, an availability rule, or a sign convention
+// changes in a way that could make a historical Result not reproduce
+// identically under the new code — see the repository README's
+// versioning-strategy section. Echoed on every Result so a persisted
+// historical calculation remains self-describing about exactly which
+// formula set produced it.
+const FormulaVersion = "1.0.0"
+
 // Result is the output of Calculate: one Snapshot per period present in the
 // dataset, plus an optional Trend computed across comparable periods.
 type Result struct {
+	// FormulaVersion identifies which version of this package's fixed
+	// metric formula set produced this Result — see the FormulaVersion
+	// constant's doc comment.
+	FormulaVersion string `json:"formula_version"`
 	// Snapshots holds one Snapshot per distinct financial.Period in the
 	// dataset, in the same chronological order as Periods (when PeriodMeta
 	// was supplied) or dataset lexical order otherwise.
@@ -51,7 +66,7 @@ func Calculate(dataset financial.FinancialDataset, opts Options) Result {
 		snapshots = append(snapshots, calculateSnapshot(idx, period))
 	}
 
-	result := Result{Snapshots: snapshots}
+	result := Result{FormulaVersion: FormulaVersion, Snapshots: snapshots}
 	if len(snapshots) >= 2 {
 		trend := calculateTrend(snapshots, opts.PeriodMeta)
 		result.Trend = &trend

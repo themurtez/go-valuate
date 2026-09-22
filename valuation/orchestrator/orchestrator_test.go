@@ -200,6 +200,7 @@ func TestExecute_MinApplicabilityLevelExcludesLowScoring(t *testing.T) {
 		AssetIntensity: floatPtr(0.05),
 	})
 	req.Applicability = &results
+	req.FilterPolicy = applicability.PolicyMinimumLevel
 	req.MinApplicabilityLevel = applicability.LevelMedium
 
 	run := Execute(req)
@@ -237,6 +238,77 @@ func TestExecute_ApplicabilityEchoedWithoutFiltering(t *testing.T) {
 		t.Errorf("expected all 5 methods to succeed with no MinApplicabilityLevel set, got %d", len(run.Successful()))
 	}
 }
+
+func TestExecute_PolicyExcludeNotApplicable_OnlyExcludesHardBlocked(t *testing.T) {
+	req := fullRequest()
+	// A profile with no forecast hard-blocks DCF (NOT_APPLICABLE)
+	// regardless of what its own Input carries — every other method scores
+	// somewhere in [LOW, HIGH], never NOT_APPLICABLE, for a profile this
+	// unremarkable.
+	results := applicability.Calculate(profile.Profile{
+		DataAvailability: profile.DataAvailability{HasForecast: false},
+	})
+	req.Applicability = &results
+	req.FilterPolicy = applicability.PolicyExcludeNotApplicable
+
+	run := Execute(req)
+
+	dcfOutcome := outcomeFor(t, run, valuation.CodeDCF)
+	if dcfOutcome.Outcome != OutcomeExcluded || dcfOutcome.ExclusionReason != ExclusionNotApplicable {
+		t.Errorf("DCF outcome = %v/%v, want Excluded/ExclusionNotApplicable", dcfOutcome.Outcome, dcfOutcome.ExclusionReason)
+	}
+	// Every other method must still run — PolicyExcludeNotApplicable only
+	// excludes a hard block, never a merely low (but not NOT_APPLICABLE)
+	// score.
+	for _, code := range []valuation.Code{valuation.CodeSDEMultiple, valuation.CodeEBITDAMultiple, valuation.CodeCapitalizationOfEarnings, valuation.CodeAdjustedNetAssetValue} {
+		outcome := outcomeFor(t, run, code)
+		if outcome.Outcome == OutcomeExcluded && outcome.ExclusionReason == ExclusionNotApplicable {
+			t.Errorf("%s was excluded as NOT_APPLICABLE unexpectedly: %+v", code, outcome)
+		}
+	}
+}
+
+func TestExecute_PolicyExplicitSelection_OnlyRunsSelectedMethods(t *testing.T) {
+	req := fullRequest()
+	results := applicability.Calculate(profile.Profile{OwnerOperated: boolPtr(true)})
+	req.Applicability = &results
+	req.FilterPolicy = applicability.PolicyExplicitSelection
+	req.SelectedMethods = []valuation.Code{valuation.CodeSDEMultiple, valuation.CodeEBITDAMultiple}
+
+	run := Execute(req)
+
+	for _, code := range []valuation.Code{valuation.CodeSDEMultiple, valuation.CodeEBITDAMultiple} {
+		outcome := outcomeFor(t, run, code)
+		if outcome.Outcome != OutcomeSuccess {
+			t.Errorf("%s: expected to run (selected), got Outcome=%v", code, outcome.Outcome)
+		}
+	}
+	for _, code := range []valuation.Code{valuation.CodeCapitalizationOfEarnings, valuation.CodeDCF, valuation.CodeAdjustedNetAssetValue} {
+		outcome := outcomeFor(t, run, code)
+		if outcome.Outcome != OutcomeExcluded || outcome.ExclusionReason != ExclusionNotSelected {
+			t.Errorf("%s: expected Excluded/ExclusionNotSelected (not in SelectedMethods), got %v/%v", code, outcome.Outcome, outcome.ExclusionReason)
+		}
+	}
+}
+
+func TestExecute_DefaultFilterPolicyIsIncludeAllEnabled(t *testing.T) {
+	// A zero-value Request.FilterPolicy must behave exactly like
+	// PolicyIncludeAllEnabled (today's original behavior) — a caller that
+	// never opts in is unaffected by this change.
+	req := fullRequest()
+	results := applicability.Calculate(profile.Profile{
+		OwnerOperated: boolPtr(false), AssetIntensity: floatPtr(0.05), // scores several methods LOW
+	})
+	req.Applicability = &results
+	// req.FilterPolicy intentionally left as the zero value.
+
+	run := Execute(req)
+	if len(run.Successful()) != 5 {
+		t.Errorf("expected all 5 methods to succeed under the zero-value FilterPolicy regardless of applicability score, got %d", len(run.Successful()))
+	}
+}
+
+func boolPtr(v bool) *bool { return &v }
 
 func TestExecute_WarningsCollectedAcrossMethods(t *testing.T) {
 	req := fullRequest()

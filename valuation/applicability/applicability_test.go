@@ -197,6 +197,81 @@ func TestCalculate_ScoreClampedToValidRange(t *testing.T) {
 	if sde.Score < 0 || sde.Score > 100 {
 		t.Fatalf("SDE score = %d, want within [0,100]", sde.Score)
 	}
+	if sde.RawScore >= 0 {
+		t.Errorf("RawScore = %d, want negative for this maximally-unfavorable profile (RawScore is the pre-clamp total)", sde.RawScore)
+	}
+	if !sde.Clamped {
+		t.Error("expected Clamped = true when RawScore fell outside [0,100]")
+	}
+	if sde.Score != 0 {
+		t.Errorf("Score = %d, want 0 (clamped floor)", sde.Score)
+	}
+}
+
+func TestCalculate_ExplanationTrail_BaseAndRawScoreAlwaysExplainScore(t *testing.T) {
+	// The task's worked example: base score + every Reason's Points must
+	// sum to RawScore, and RawScore clamped to [0,100] must equal Score.
+	p := profile.Profile{
+		OwnerOperated:  boolPtr(true),
+		AnnualRevenue:  floatPtr(900_000),
+		AssetIntensity: floatPtr(0.2),
+	}
+	r := Calculate(p)
+	for _, res := range r.Methods {
+		if res.BaseScore != baseScore {
+			t.Errorf("%s: BaseScore = %d, want %d", res.Method, res.BaseScore, baseScore)
+		}
+		sum := res.BaseScore
+		for _, reason := range res.Reasons {
+			sum += reason.Points
+		}
+		if sum != res.RawScore {
+			t.Errorf("%s: BaseScore (%d) + sum of Reasons' Points != RawScore (%d); got sum=%d", res.Method, res.BaseScore, res.RawScore, sum)
+		}
+		wantClamped := clampScore(res.RawScore)
+		if res.Score != wantClamped {
+			t.Errorf("%s: Score = %d, want clampScore(RawScore) = %d", res.Method, res.Score, wantClamped)
+		}
+		wantIsClamped := res.RawScore != wantClamped
+		if res.Clamped != wantIsClamped {
+			t.Errorf("%s: Clamped = %v, want %v", res.Method, res.Clamped, wantIsClamped)
+		}
+	}
+}
+
+func TestCalculate_DCFHardBlock_HasHardBlockReasonNotJustLowScore(t *testing.T) {
+	// scoreDCF's absent-forecast case is a structural block, not an
+	// ordinary low score reached by accumulating Reasons — HardBlockReason
+	// must be set so a reviewer/UI can distinguish "cannot run without more
+	// data" from "could run, but is a poor fit."
+	r := Calculate(profile.Profile{DataAvailability: profile.DataAvailability{HasForecast: false}})
+	dcf := resultFor(t, r, valuation.CodeDCF)
+	if dcf.HardBlockReason == "" {
+		t.Fatal("expected a non-empty HardBlockReason when DCF has no forecast available")
+	}
+	if dcf.Level != LevelNotApplicable {
+		t.Errorf("Level = %v, want NOT_APPLICABLE", dcf.Level)
+	}
+	if dcf.Score != 0 {
+		t.Errorf("Score = %d, want 0", dcf.Score)
+	}
+}
+
+func TestCalculate_NoHardBlockReasonForOrdinaryLowScore(t *testing.T) {
+	// A method that scores low through ordinary Reason accumulation (not a
+	// structural block) must have an empty HardBlockReason — the field is
+	// reserved for the DCF-no-forecast case specifically.
+	p := profile.Profile{
+		OwnerOperated:     boolPtr(false),
+		AnnualRevenue:     floatPtr(50_000_000),
+		Profitability:     profile.ProfitabilityUnprofitable,
+		EarningsStability: profile.EarningsStabilityVolatile,
+	}
+	r := Calculate(p)
+	sde := resultFor(t, r, valuation.CodeSDEMultiple)
+	if sde.HardBlockReason != "" {
+		t.Errorf("HardBlockReason = %q, want empty for an ordinary low-scoring (not structurally blocked) result", sde.HardBlockReason)
+	}
 }
 
 func TestResult_RecommendedMatchesLevel(t *testing.T) {

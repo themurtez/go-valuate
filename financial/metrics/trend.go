@@ -67,7 +67,9 @@ type Trend struct {
 }
 
 // GrowthPoint is a single year-over-year growth calculation between two
-// adjacent fiscal years.
+// adjacent fiscal years. Every []GrowthPoint series on Trend (e.g.
+// RevenueYoYGrowth) is ordered chronologically, matching
+// Trend.FiscalYearsUsed — never relies on map iteration order.
 type GrowthPoint struct {
 	// FromPeriod and ToPeriod are the fiscal-year periods compared.
 	FromPeriod string `json:"from_period"`
@@ -85,6 +87,8 @@ type GrowthPoint struct {
 }
 
 // MarginPoint is a single period's margin level (not a growth rate).
+// Every []MarginPoint series on Trend (e.g. EBITDAMarginTrend) is ordered
+// chronologically, matching Trend.FiscalYearsUsed.
 type MarginPoint struct {
 	Period string      `json:"period"`
 	Margin MetricValue `json:"margin"`

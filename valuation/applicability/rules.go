@@ -65,17 +65,46 @@ func clampScore(v int) int {
 }
 
 // finalize converts an accumulated (method, score, reasons, warnings)
-// tuple into a Result: clamps Score, derives Level, and sets Recommended.
+// tuple into a Result: clamps Score, derives Level, and sets Recommended —
+// see finalizeBlocked for the hard-block variant.
 func finalize(method valuation.Code, score int, reasons []Reason, warnings []string) Result {
-	clamped := clampScore(score)
-	level := levelForScore(clamped)
+	clampedScore := clampScore(score)
+	level := levelForScore(clampedScore)
 	return Result{
 		Method:      method,
-		Score:       clamped,
+		BaseScore:   baseScore,
+		RawScore:    score,
+		Score:       clampedScore,
+		Clamped:     score != clampedScore,
 		Level:       level,
 		Recommended: level == LevelHigh || level == LevelMedium,
 		Reasons:     reasons,
 		Warnings:    warnings,
+	}
+}
+
+// finalizeBlocked is finalize's hard-block variant, used only by scoreDCF
+// today: unlike an ordinary low Score reached by accumulating Reasons, a
+// hard block means the method cannot run at all absent more data,
+// regardless of what every other rule would otherwise say — see
+// Result.HardBlockReason's doc comment for why this is surfaced as its own
+// field rather than left implicit in a Score of 0.
+func finalizeBlocked(method valuation.Code, reason string, reasons []Reason, warnings []string) Result {
+	raw := baseScore
+	for _, r := range reasons {
+		raw += r.Points
+	}
+	return Result{
+		Method:          method,
+		BaseScore:       baseScore,
+		RawScore:        raw,
+		Score:           0,
+		Clamped:         raw != 0,
+		Level:           LevelNotApplicable,
+		Recommended:     false,
+		HardBlockReason: reason,
+		Reasons:         reasons,
+		Warnings:        warnings,
 	}
 }
 
@@ -253,8 +282,9 @@ func scoreCapitalization(p profile.Profile) Result {
 // package brief) and is never invented here as a substitute.
 func scoreDCF(p profile.Profile) Result {
 	if !p.DataAvailability.HasForecast {
-		return finalize(valuation.CodeDCF, 0, []Reason{
-			{Kind: ReasonDataGap, Detail: "no explicit forecast cash flows available; valuation/dcf never generates a forecast, so DCF cannot run at all for this business", Points: pointsBlocking},
+		const reason = "no explicit forecast cash flows available; valuation/dcf never generates a forecast, so DCF cannot run at all for this business"
+		return finalizeBlocked(valuation.CodeDCF, reason, []Reason{
+			{Kind: ReasonDataGap, Detail: reason, Points: pointsBlocking},
 		}, []string{"supply an explicit multi-period free cash flow forecast (valuation/dcf.Input.ForecastPeriods) to make DCF applicable"})
 	}
 

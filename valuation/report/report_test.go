@@ -23,8 +23,11 @@ import (
 func sampleRun(t *testing.T) orchestrator.Run {
 	t.Helper()
 	req := orchestrator.Request{
-		SDE:            &sde.Input{MaintainableSDE: 300_000, Multiple: 2.5},
-		EBITDA:         &ebitda.Input{MaintainableEBITDA: 400_000, Multiple: 3.5},
+		SDE: &sde.Input{MaintainableSDE: 300_000, Multiple: 2.5},
+		EBITDA: &ebitda.Input{
+			MaintainableEBITDA: 400_000, Multiple: 3.5,
+			EquityBridge: ebitda.EquityBridgeInput{Requested: true, ExcessCash: 50_000, ShortTermDebt: 20_000, LongTermDebt: 30_000},
+		},
 		Capitalization: &capitalization.Input{MaintainableEarnings: 300_000, CapitalizationRate: 0.25},
 		DCF: &dcf.Input{
 			ForecastPeriods: []dcf.ForecastPeriod{
@@ -33,6 +36,7 @@ func sampleRun(t *testing.T) orchestrator.Run {
 			},
 			DiscountRate:       0.18,
 			TerminalGrowthRate: 0.03,
+			EquityBridge:       dcf.EquityBridgeInput{Requested: true, ExcessCash: 40_000, ShortTermDebt: 10_000, LongTermDebt: 15_000},
 		},
 	}
 	return orchestrator.Execute(req)
@@ -84,7 +88,7 @@ func TestBuild_SummaryFromConsensus(t *testing.T) {
 		valuation.CodeCapitalizationOfEarnings: 1,
 		valuation.CodeDCF:                      1,
 	})
-	c := consensus.Calculate(inputs)
+	c := consensus.Calculate(inputs, consensus.Options{TargetBasis: valuation.ValueTypeEquity})
 	rep := Build(BuildInput{Run: &run, Consensus: &c, ValuationDate: "2026-09-22"})
 
 	if !rep.Summary.ConsensusAvailable {
@@ -275,12 +279,49 @@ func TestBuild_UnavailableMethodReportedNotIncluded(t *testing.T) {
 	}
 }
 
+func TestBuildConsensusInputs_NeverIncludesUnavailableOrExcludedMethods(t *testing.T) {
+	req := orchestrator.Request{
+		SDE:       &sde.Input{MaintainableSDE: 300_000, Multiple: 2.5}, // succeeds
+		NetAssets: &netassets.Input{},                                  // no assets -> unavailable
+		// EBITDA/Capitalization/DCF: no Input supplied -> excluded
+	}
+	run := orchestrator.Execute(req)
+	inputs := BuildConsensusInputs(run, nil)
+	if len(inputs) != 1 {
+		t.Fatalf("BuildConsensusInputs returned %d inputs, want exactly 1 (only the successful SDE method); got %+v", len(inputs), inputs)
+	}
+	if inputs[0].Method != valuation.CodeSDEMultiple {
+		t.Errorf("included method = %v, want %v", inputs[0].Method, valuation.CodeSDEMultiple)
+	}
+}
+
+func TestBuildConsensusInputs_WeightForAbsentMethodHasNoEffect(t *testing.T) {
+	req := orchestrator.Request{
+		SDE: &sde.Input{MaintainableSDE: 300_000, Multiple: 2.5}, // the only method that will run
+	}
+	run := orchestrator.Execute(req)
+	// Supply a weight for a method that was never even requested — it must
+	// be silently ignored, never cause that method to appear as a
+	// dead-weight entry in the consensus input set.
+	weights := map[valuation.Code]float64{
+		valuation.CodeSDEMultiple:    1,
+		valuation.CodeEBITDAMultiple: 5,
+	}
+	inputs := BuildConsensusInputs(run, weights)
+	if len(inputs) != 1 {
+		t.Fatalf("BuildConsensusInputs returned %d inputs, want exactly 1; a weight for an absent method must not add a phantom entry: %+v", len(inputs), inputs)
+	}
+	if inputs[0].Method != valuation.CodeSDEMultiple {
+		t.Errorf("included method = %v, want %v", inputs[0].Method, valuation.CodeSDEMultiple)
+	}
+}
+
 // --- JSON serialization tests ---
 
 func TestReport_JSONRoundTrip(t *testing.T) {
 	run := sampleRun(t)
 	inputs := BuildConsensusInputs(run, nil)
-	c := consensus.Calculate(inputs)
+	c := consensus.Calculate(inputs, consensus.Options{TargetBasis: valuation.ValueTypeEquity})
 	snapshots := []metrics.Snapshot{
 		{Period: "2025", TotalRevenue: metrics.AvailableValue(1_000_000)},
 	}
@@ -298,11 +339,15 @@ func TestReport_JSONRoundTrip(t *testing.T) {
 	if err := json.Unmarshal(data, &roundTripped); err != nil {
 		t.Fatalf("json.Unmarshal failed: %v", err)
 	}
-	if roundTripped.Summary.SimpleConsensus != rep.Summary.SimpleConsensus {
-		t.Errorf("round-tripped SimpleConsensus = %v, want %v", roundTripped.Summary.SimpleConsensus, rep.Summary.SimpleConsensus)
+	// Full round-trip contract: marshal -> unmarshal -> marshal must
+	// reproduce the exact same bytes, not merely agree on a couple of
+	// spot-checked fields.
+	data2, err := json.Marshal(roundTripped)
+	if err != nil {
+		t.Fatalf("re-marshal of round-tripped Report failed: %v", err)
 	}
-	if len(roundTripped.Methods) != len(rep.Methods) {
-		t.Errorf("round-tripped Methods len = %d, want %d", len(roundTripped.Methods), len(rep.Methods))
+	if string(data) != string(data2) {
+		t.Fatal("Report did not round-trip byte-for-byte through marshal -> unmarshal -> marshal")
 	}
 }
 
@@ -314,7 +359,7 @@ func TestReport_JSONHasNoNaNOrInf(t *testing.T) {
 		SDE: &sde.Input{MaintainableSDE: 0, Multiple: 1},
 	})
 	inputs := BuildConsensusInputs(run, nil)
-	c := consensus.Calculate(inputs)
+	c := consensus.Calculate(inputs, consensus.Options{TargetBasis: valuation.ValueTypeEquity})
 	rep := Build(BuildInput{Run: &run, Consensus: &c})
 
 	if _, err := json.Marshal(rep); err != nil {

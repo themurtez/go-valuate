@@ -205,3 +205,22 @@ func TestCalculate_DoesNotAssumeBookEqualsFairValue(t *testing.T) {
 		t.Error("expected the IsOverride flag to be preserved distinctly")
 	}
 }
+
+func TestCalculate_ResultEnvelopeIsValid(t *testing.T) {
+	res := Calculate(Input{Assets: []AssetItem{{Label: "Cash", Amount: 200000}}})
+	if issues := valuation.ValidateResultEnvelope(res.Method, res.MethodVersion, res.ValueType); len(issues) != 0 {
+		t.Errorf("ValidateResultEnvelope() = %+v, want no issues", issues)
+	}
+	if issues := valuation.ValidateFiniteSteps(res.Steps); len(issues) != 0 {
+		t.Errorf("ValidateFiniteSteps() = %+v, want no issues", issues)
+	}
+	if res.Method != Code {
+		t.Errorf("Method = %v, want %v", res.Method, Code)
+	}
+	if res.MethodVersion != Version {
+		t.Errorf("MethodVersion = %v, want %v", res.MethodVersion, Version)
+	}
+	if res.ValueType != valuation.ValueTypeAsset {
+		t.Errorf("ValueType = %v, want %v", res.ValueType, valuation.ValueTypeAsset)
+	}
+}

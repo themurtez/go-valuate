@@ -77,15 +77,25 @@ type BuildInput struct {
 // gets Weight 0, which — per valuation/consensus.ValidateWeights — is
 // valid as long as at least one included method has a positive weight; an
 // all-zero weight set makes WeightedMean unavailable rather than the whole
-// consensus). This is a thin convenience, not a requirement: a caller
-// building its own []consensus.Input (e.g. to exclude a successful method
-// from consensus deliberately) is free to skip this and call
-// consensus.Calculate directly.
+// consensus). run.Successful() already excludes every excluded/unavailable
+// method by construction (see orchestrator.Run.Successful), so a weight
+// entry for a method that never ran or did not succeed simply has no
+// effect here — it never causes that method to be woven into the
+// consensus. Each Input also carries the method's own already-computed
+// valuation.Bridge (see headlineValue), so a caller passing
+// consensus.Options{TargetBasis: valuation.ValueTypeEquity} to
+// consensus.Calculate gets every enterprise-value method converted using
+// its own bridge rather than needing to re-supply one.
+//
+// This is a thin convenience, not a requirement: a caller building its own
+// []consensus.Input (e.g. to exclude a successful method from consensus
+// deliberately) is free to skip this and call consensus.Calculate
+// directly.
 func BuildConsensusInputs(run orchestrator.Run, weights map[valuation.Code]float64) []consensus.Input {
 	successful := run.Successful()
 	inputs := make([]consensus.Input, 0, len(successful))
 	for _, m := range successful {
-		value, valueType, ok := headlineValue(m)
+		value, valueType, bridge, ok := headlineValue(m)
 		if !ok {
 			continue
 		}
@@ -94,27 +104,29 @@ func BuildConsensusInputs(run orchestrator.Run, weights map[valuation.Code]float
 			ValueType: valueType,
 			Value:     value,
 			Weight:    weights[m.Method],
+			Bridge:    bridge,
 		})
 	}
 	return inputs
 }
 
-// headlineValue extracts a MethodOutcome's headline figure and value type
-// from whichever method Result is populated.
-func headlineValue(m orchestrator.MethodOutcome) (value float64, valueType valuation.ValueType, ok bool) {
+// headlineValue extracts a MethodOutcome's headline figure, value type,
+// and equity bridge (if the method computed one) from whichever method
+// Result is populated.
+func headlineValue(m orchestrator.MethodOutcome) (value float64, valueType valuation.ValueType, bridge valuation.Bridge, ok bool) {
 	switch {
 	case m.SDE != nil:
-		return m.SDE.EquityValue, m.SDE.ValueType, true
+		return m.SDE.EquityValue, m.SDE.ValueType, valuation.Bridge{}, true
 	case m.EBITDA != nil:
-		return m.EBITDA.EnterpriseValue, m.EBITDA.ValueType, true
+		return m.EBITDA.EnterpriseValue, m.EBITDA.ValueType, m.EBITDA.Bridge, true
 	case m.Capitalization != nil:
-		return m.Capitalization.EquityValue, m.Capitalization.ValueType, true
+		return m.Capitalization.EquityValue, m.Capitalization.ValueType, valuation.Bridge{}, true
 	case m.DCF != nil:
-		return m.DCF.EnterpriseValue, m.DCF.ValueType, true
+		return m.DCF.EnterpriseValue, m.DCF.ValueType, m.DCF.Bridge, true
 	case m.NetAssets != nil:
-		return m.NetAssets.AdjustedNetAssetValue, m.NetAssets.ValueType, true
+		return m.NetAssets.AdjustedNetAssetValue, m.NetAssets.ValueType, valuation.Bridge{}, true
 	default:
-		return 0, "", false
+		return 0, "", valuation.Bridge{}, false
 	}
 }
 
@@ -124,12 +136,13 @@ func headlineValue(m orchestrator.MethodOutcome) (value float64, valueType valua
 // BuildInput's doc comment.
 func Build(in BuildInput) Report {
 	return Report{
-		Summary:     buildSummary(in),
-		Financial:   buildFinancialSummary(in),
-		Methods:     buildMethods(in),
-		Adjustments: buildAdjustmentSummary(in),
-		Sensitivity: buildSensitivityData(in),
-		Series:      buildSeries(in),
+		SchemaVersion: SchemaVersion,
+		Summary:       buildSummary(in),
+		Financial:     buildFinancialSummary(in),
+		Methods:       buildMethods(in),
+		Adjustments:   buildAdjustmentSummary(in),
+		Sensitivity:   buildSensitivityData(in),
+		Series:        buildSeries(in),
 	}
 }
 
@@ -435,7 +448,7 @@ func buildSeries(in BuildInput) ChartSeries {
 			if !ok || outcome.Outcome != orchestrator.OutcomeSuccess {
 				continue
 			}
-			value, _, ok := headlineValue(outcome)
+			value, _, _, ok := headlineValue(outcome)
 			if !ok {
 				continue
 			}

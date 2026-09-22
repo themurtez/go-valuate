@@ -3,6 +3,7 @@ package orchestrator
 import (
 	"github.com/themurtez/go-valuate/settings"
 	"github.com/themurtez/go-valuate/valuation"
+	"github.com/themurtez/go-valuate/valuation/applicability"
 	"github.com/themurtez/go-valuate/valuation/capitalization"
 	"github.com/themurtez/go-valuate/valuation/dcf"
 	"github.com/themurtez/go-valuate/valuation/ebitda"
@@ -35,10 +36,14 @@ type methodSpec struct {
 //     construct every Input unconditionally and let settings decide.
 //  2. Else if no Input was supplied for the method, it is OutcomeExcluded
 //     with ExclusionNoInput.
-//  3. Else if req.Applicability and req.MinApplicabilityLevel are both
-//     set, and the method's applicability.Result.Level ranks below
-//     MinApplicabilityLevel, it is OutcomeExcluded with
-//     ExclusionLowApplicability.
+//  3. Else, if req.Applicability is set, req.FilterPolicy is applied (see
+//     applicability.FilterPolicy's constants for the full set of
+//     policies): PolicyIncludeAllEnabled (the zero value) filters nothing;
+//     PolicyExcludeNotApplicable excludes a method scored exactly
+//     LevelNotApplicable (ExclusionNotApplicable); PolicyMinimumLevel
+//     excludes a method whose Level ranks below MinApplicabilityLevel
+//     (ExclusionLowApplicability); PolicyExplicitSelection excludes a
+//     method not named in SelectedMethods (ExclusionNotSelected).
 //  4. Else the method's own Calculate runs, and the MethodOutcome is
 //     OutcomeSuccess (Result.Available == true) or OutcomeUnavailable
 //     (Result.Available == false) accordingly — Execute reports the
@@ -155,19 +160,72 @@ func evaluate(req Request, spec methodSpec) MethodOutcome {
 			Detail:          "no input supplied for this method",
 		}
 	}
-	if req.Applicability != nil && req.MinApplicabilityLevel != "" {
-		if res, ok := req.Applicability.ForMethod(string(spec.code)); ok {
-			if levelRank(res.Level) < levelRank(req.MinApplicabilityLevel) {
-				return MethodOutcome{
-					Method:          spec.code,
-					Outcome:         OutcomeExcluded,
-					ExclusionReason: ExclusionLowApplicability,
-					Detail:          "applicability level " + string(res.Level) + " is below the configured minimum " + string(req.MinApplicabilityLevel),
-				}
-			}
-		}
+	if excluded, outcome := applicabilityExcluded(req, spec.code); excluded {
+		return outcome
 	}
 	return spec.run(req)
+}
+
+// applicabilityExcluded applies req.FilterPolicy (see its doc comment on
+// Request.FilterPolicy for the full policy set) and reports whether code
+// should be excluded before running, and if so, the MethodOutcome to
+// return. Returns excluded=false (proceed to spec.run) whenever
+// req.Applicability is nil, regardless of FilterPolicy — there is nothing
+// to filter by.
+func applicabilityExcluded(req Request, code valuation.Code) (excluded bool, outcome MethodOutcome) {
+	if req.Applicability == nil {
+		return false, MethodOutcome{}
+	}
+	res, ok := req.Applicability.ForMethod(string(code))
+	if !ok {
+		return false, MethodOutcome{}
+	}
+
+	switch req.FilterPolicy {
+	case applicability.PolicyExcludeNotApplicable:
+		if res.Level == applicability.LevelNotApplicable {
+			detail := "applicability level is NOT_APPLICABLE"
+			if res.HardBlockReason != "" {
+				detail = res.HardBlockReason
+			}
+			return true, MethodOutcome{
+				Method: code, Outcome: OutcomeExcluded,
+				ExclusionReason: ExclusionNotApplicable, Detail: detail,
+			}
+		}
+	case applicability.PolicyMinimumLevel:
+		if req.MinApplicabilityLevel != "" && levelRank(res.Level) < levelRank(req.MinApplicabilityLevel) {
+			return true, MethodOutcome{
+				Method: code, Outcome: OutcomeExcluded,
+				ExclusionReason: ExclusionLowApplicability,
+				Detail:          "applicability level " + string(res.Level) + " is below the configured minimum " + string(req.MinApplicabilityLevel),
+			}
+		}
+	case applicability.PolicyExplicitSelection:
+		if !containsCode(req.SelectedMethods, code) {
+			return true, MethodOutcome{
+				Method: code, Outcome: OutcomeExcluded,
+				ExclusionReason: ExclusionNotSelected,
+				Detail:          "method was not named in the caller's explicit method selection",
+			}
+		}
+	case applicability.PolicyIncludeAllEnabled, "":
+		// No filtering — applicability is informational only. The empty
+		// string is the zero value of Request.FilterPolicy, so a caller
+		// that never opts in gets exactly this behavior, matching this
+		// package's original (pre-policy) default.
+	}
+	return false, MethodOutcome{}
+}
+
+// containsCode reports whether code appears anywhere in codes.
+func containsCode(codes []valuation.Code, code valuation.Code) bool {
+	for _, c := range codes {
+		if c == code {
+			return true
+		}
+	}
+	return false
 }
 
 // outcomeFromAvailable maps a method Result's Available field to an Outcome

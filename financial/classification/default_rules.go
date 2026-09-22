@@ -2,6 +2,16 @@ package classification
 
 import "github.com/themurtez/go-valuate/financial"
 
+// DefaultRulesVersion identifies the fixed rule set DefaultRules returns.
+// Bump this whenever a rule is added, removed, or its matching/precedence
+// behavior changes in a way that could make a historical classification
+// Result not reproduce identically under the new code — see the
+// repository README's versioning-strategy section. A caller assembling a
+// fully custom Config.Rules (not using DefaultRules at all) is versioning
+// its own rule set independently; this constant only describes the
+// built-in one.
+const DefaultRulesVersion = "1.0.0"
+
 // DefaultRules returns the built-in set of context-aware and phrase/token
 // rules, in the precedence order they should be evaluated (earlier rules win
 // ties by virtue of running first, though Classify continues scanning all

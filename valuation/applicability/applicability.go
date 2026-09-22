@@ -31,6 +31,43 @@ const (
 	LevelNotApplicable Level = "NOT_APPLICABLE"
 )
 
+// FilterPolicy is a caller-selected, deterministic policy for how an
+// orchestrator (or any other caller consuming applicability scores)
+// should use Results to decide which methods to actually run. Every
+// policy is fully specified by its name alone — none of them consult
+// anything beyond Results and, for PolicyMinimumLevel/
+// PolicyExplicitSelection, the caller's own accompanying threshold/
+// selection — so a caller can choose a policy without touching how
+// applicability itself is scored. See valuation/orchestrator.Request for
+// where this is consumed; this package defines the policy vocabulary
+// without depending on orchestrator.
+type FilterPolicy string
+
+const (
+	// PolicyIncludeAllEnabled means applicability is purely informational:
+	// every settings-enabled method with a supplied Input runs regardless
+	// of its Score/Level. This is the zero-value policy — a caller that
+	// never opts into filtering gets exactly today's behavior.
+	PolicyIncludeAllEnabled FilterPolicy = "INCLUDE_ALL_ENABLED"
+	// PolicyExcludeNotApplicable excludes only a method whose Level is
+	// exactly LevelNotApplicable (a hard block, e.g. DCF with no
+	// forecast — see Result.HardBlockReason) — the least aggressive
+	// filtering policy that still respects a genuine hard block.
+	PolicyExcludeNotApplicable FilterPolicy = "EXCLUDE_NOT_APPLICABLE"
+	// PolicyMinimumLevel excludes any method whose Level ranks below a
+	// caller-supplied minimum threshold (see levelRank's ordering:
+	// NOT_APPLICABLE < LOW < MEDIUM < HIGH). This is today's
+	// MinApplicabilityLevel behavior, now named as one policy among
+	// several rather than the only option.
+	PolicyMinimumLevel FilterPolicy = "MINIMUM_LEVEL"
+	// PolicyExplicitSelection ignores Score/Level for inclusion entirely:
+	// only methods a caller explicitly names run, regardless of how they
+	// scored. Applicability is still echoed on every MethodOutcome for
+	// display, but plays no role in whether a method executes under this
+	// policy.
+	PolicyExplicitSelection FilterPolicy = "EXPLICIT_METHOD_SELECTION"
+)
+
 // ReasonKind distinguishes a reason that reflects the business's
 // characteristics (Fit) from one that reflects missing/insufficient input
 // data (DataGap) — the same Level can be reached for structurally
@@ -65,15 +102,42 @@ type Reason struct {
 	Points int `json:"points"`
 }
 
-// Result is one method's applicability outcome for a given Profile.
+// Result is one method's applicability outcome for a given Profile. Every
+// field here exists so an accountant reviewing a recommendation can
+// reconstruct exactly how Score was reached without reading this
+// package's source — see Calculate's doc comment for the full worked
+// example this shape is designed to support:
+//
+//	base score:                         50
+//	owner-operated service business:  +25
+//	low asset intensity:              +15
+//	stable positive earnings:         +15
+//	--------------------------------------
+//	raw score:                        105
+//	clamped score:                     100
 type Result struct {
 	// Method is the valuation.Code this result scores.
 	Method valuation.Code `json:"method"`
-	// Score is the sum of every Reason's Points, clamped to [0, 100] —
-	// see Calculate's doc comment for the exact fixed point scale each
-	// rule uses. Score is a deterministic heuristic total, not a
-	// statistical probability or an industry-standard confidence measure.
+	// BaseScore is the starting point every rule's Reasons were added to
+	// or subtracted from — always baseScore (50) today, but exposed
+	// explicitly (rather than left as an unstated constant only visible in
+	// source) so the worked example above is fully reproducible from
+	// Result alone.
+	BaseScore int `json:"base_score"`
+	// RawScore is BaseScore plus every Reason's Points, before clamping —
+	// i.e. what Score would be if it were allowed to fall outside [0,100].
+	// Equal to Score whenever Clamped is false.
+	RawScore int `json:"raw_score"`
+	// Score is RawScore clamped to [0, 100] — see Calculate's doc comment
+	// for the exact fixed point scale each rule uses. Score is a
+	// deterministic heuristic total, not a statistical probability or an
+	// industry-standard confidence measure.
 	Score int `json:"score"`
+	// Clamped is true if RawScore fell outside [0, 100] and Score is
+	// consequently not equal to RawScore — a visible flag rather than
+	// requiring a caller to compare the two fields themselves to notice
+	// clamping occurred.
+	Clamped bool `json:"clamped"`
 	// Level is Score passed through levelForScore's fixed thresholds.
 	Level Level `json:"level"`
 	// Recommended is true when Level is LevelHigh or LevelMedium — a
@@ -82,6 +146,14 @@ type Result struct {
 	// itself. A caller is always free to override this (e.g. force-include
 	// a LevelLow method); Recommended is a default, not a constraint.
 	Recommended bool `json:"recommended"`
+	// HardBlockReason is non-empty only when a rule short-circuited
+	// straight to NOT_APPLICABLE regardless of every other rule (today,
+	// only scoreDCF's absent-forecast case — see pointsBlocking), as
+	// opposed to a low Score reached by the ordinary accumulation of
+	// Reasons. Distinguishing the two matters to a reviewer: a hard block
+	// means "this method cannot run at all without more data," while a low
+	// accumulated Score means "this method could run, but is a poor fit."
+	HardBlockReason string `json:"hard_block_reason,omitempty"`
 	// Reasons lists every Reason that contributed to Score, in evaluation
 	// order, so Score is always fully explained.
 	Reasons []Reason `json:"reasons"`
