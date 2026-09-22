@@ -1,8 +1,14 @@
 # go-valuate
 
 Reusable, standalone Go domain modules for business valuation: a canonical
-financial data model, a deterministic normalizer, a deterministic
-rule/alias-based classifier, and a hierarchical valuation-settings resolver.
+financial data model, a deterministic normalizer and classifier, derived
+financial metrics and normalization adjustments, five individual valuation
+methods (SDE multiple, EBITDA multiple, capitalization of earnings, DCF,
+adjusted net asset value), method applicability scoring, an orchestrator,
+a consensus/dispersion engine, sensitivity analysis, a presentation-neutral
+report model, and a hierarchical valuation-settings resolver — together a
+complete deterministic valuation core, front to back
+(see [`valuation/e2e`](valuation/e2e)).
 
 This is a **library of pure domain logic**, developed independently of any
 larger application. The intent is that its packages will later be copied or
@@ -1181,6 +1187,335 @@ duplicating that figure in the valuation fixture, so expected outputs are
 computed independently in the tests themselves and can never silently
 drift from either fixture file.
 
+### `valuation/profile`
+
+A minimal, domain-level description of the business being valued, used
+**only** to drive `valuation/applicability`'s scoring rules. It is
+deliberately not a CRM/business-entity model: no name, address, contact,
+ownership, or account/client/tenant concept — those belong to a consuming
+application.
+
+`Profile` fields are optional (pointers, or a zero value that is itself a
+legitimate "unknown" state): `Industry`, `OwnerOperated *bool`,
+`AnnualRevenue *float64`, `EmployeeCount *int`, `AssetIntensity *float64`
+(tangible operating assets / revenue), `RecurringRevenuePercent *float64`,
+`HistoricalGrowthRate *float64`, `EarningsStability`, `Profitability`,
+`YearsInOperation *int`, and `DataAvailability` (which underlying inputs —
+multi-year financials, a balance sheet, an explicit forecast, appraised
+asset values — the caller actually has on hand). A `Profile` with every
+field left unset is valid input; applicability rules degrade to a neutral
+default rather than failing.
+
+### `valuation/applicability`
+
+Deterministic, transparent rules that score how well-suited each
+individual valuation method is to a particular business, from a
+`profile.Profile`. **Every rule is a fixed, documented point-scoring
+heuristic — never a statistical model, never trained on data, and never a
+probability.**
+
+```go
+type Level string
+
+const (
+    LevelHigh          Level = "HIGH"
+    LevelMedium        Level = "MEDIUM"
+    LevelLow           Level = "LOW"
+    LevelNotApplicable Level = "NOT_APPLICABLE"
+)
+
+func Calculate(p profile.Profile) Results
+```
+
+`Results.Methods` holds one `Result` per method (SDE, EBITDA,
+Capitalization, DCF, NetAssets), each with `Score int` (0-100), `Level`,
+`Recommended bool` (`Level` is HIGH or MEDIUM), `Reasons []Reason` (every
+point contribution, positive or negative, with a fixed human-readable
+`Detail` — nothing is scored silently), and `Warnings []string`.
+
+**Scoring.** Every method starts at `baseScore = 50` (a neutral MEDIUM, so
+a wholly-empty `Profile` doesn't default to HIGH with zero evidence or LOW
+as if missing data were itself disqualifying). Rules then add or subtract
+fixed point deltas (`+25`/`+15`/`+8`/`-8`/`-15`/`-25`) based on `Profile`
+fields relevant to that method's conventional fit — e.g. SDE gains heavily
+for `OwnerOperated == true` and small revenue/headcount; EBITDA gains for
+`OwnerOperated == false` and larger revenue; Capitalization needs stable
+`EarningsStability`; NetAssets needs high `AssetIntensity` and an available
+balance sheet. The running total is clamped to `[0,100]` and mapped to a
+`Level` via fixed thresholds (80-100 HIGH, 50-79 MEDIUM, 1-49 LOW, 0
+NOT_APPLICABLE).
+
+**DCF is the one hard-blocked method.** `valuation/dcf` never generates a
+forecast (see its own section below), so `scoreDCF` returns `Score: 0,
+Level: NOT_APPLICABLE` outright whenever
+`Profile.DataAvailability.HasForecast` is false — a data-availability
+block, not a matter of degree — regardless of how well the business's
+growth profile would otherwise suit a DCF. **Revenue-multiple valuation is
+out of scope for this repository and is never invented here as a DCF
+substitute** for a growth company with weak current earnings; DCF is
+scored applicable only when the caller supplies (or intends to supply) an
+explicit forecast.
+
+```go
+r := applicability.Calculate(profile.Profile{
+    OwnerOperated:  boolPtr(true),
+    AnnualRevenue:  floatPtr(900_000),
+    AssetIntensity: floatPtr(0.2),
+})
+sdeResult, _ := r.ForMethod(string(valuation.CodeSDEMultiple))
+// sdeResult.Level == applicability.LevelHigh
+```
+
+### `valuation/orchestrator`
+
+A pure orchestrator that runs a selected set of individual valuation
+methods against caller-supplied, method-specific inputs and reports one
+outcome per method — **it never aborts the whole run because one method
+is unavailable or excluded.**
+
+```go
+type Outcome string
+
+const (
+    OutcomeSuccess     Outcome = "success"     // ran, Result.Available == true
+    OutcomeUnavailable Outcome = "unavailable" // ran, but the method's own validation blocked it
+    OutcomeExcluded    Outcome = "excluded"    // never ran at all
+)
+
+func Execute(req Request) Run
+```
+
+`Request` carries a `settings.Resolution`, an optional
+`*applicability.Results` (+ `MinApplicabilityLevel` to opt into filtering
+low-scoring methods), and one optional `*Input` per method
+(`SDE *sde.Input`, `EBITDA *ebitda.Input`, etc. — `nil` means "don't run
+this method"). `Run.Methods` lists every method's `MethodOutcome`, in a
+fixed order (SDE, EBITDA, Capitalization, DCF, NetAssets), each carrying
+the method's own strongly-typed `*Result` pointer (not an `any`) when it
+ran, plus `Successful()`/`Excluded()`/`Unavailable()` convenience filters
+and a flattened `Warnings []MethodWarning` across every method.
+
+**Evaluation order per method:** (1) explicitly disabled by
+`settings.Resolution` → `ExclusionDisabledBySettings`; (2) no `Input`
+supplied → `ExclusionNoInput`; (3) `MinApplicabilityLevel` set and the
+method's applicability `Level` ranks below it → `ExclusionLowApplicability`;
+(4) otherwise the method's own `Calculate` runs, and `Outcome` is
+`OutcomeSuccess`/`OutcomeUnavailable` from that `Result`'s own `Available`
+field — the orchestrator never re-derives or overrides it. A method with
+no explicit `method_enabled.<method>` entry anywhere in the `Resolution`
+defaults to **enabled**.
+
+```
+SDE:        success
+EBITDA:     success
+DCF:        unavailable — no forecast cash flow supplied
+NetAssets:  excluded — no input supplied
+```
+
+### `valuation/consensus`
+
+Combines multiple included method results into descriptive statistics —
+never a claim about the business's "true" value.
+
+```go
+type Input struct {
+    Method    valuation.Code
+    ValueType valuation.ValueType
+    Value     float64
+    Weight    float64
+}
+
+func Calculate(inputs []Input) Result
+```
+
+`Result.Statistics` (`Statistics` struct) holds: `SimpleMean` ("Simple
+Consensus"), `WeightedMean` ("Weighted Consensus", meaningful only when
+`Result.WeightsValid`), `Median`, `Min`/`Max`/`Spread`, `StdDev`
+(**population** standard deviation — every included result is the complete
+set being summarized, not a sample), `CoefficientOfVariation` (=
+`StdDev / |SimpleMean|`), and `DeviationsFromMean`/
+`DeviationsFromWeightedMean` (each method's signed and percent deviation
+from the respective central figure). `Result.Range` is the explicit
+`{Min, Max}` method range — **this package invents no narrower "likely
+range."** `Result.MixedValueTypes` warns (never blocks) when `Included`
+mixes `enterprise_value`/`equity_value`/`asset_value` results without an
+explicit bridge.
+
+**Formulas:**
+
+```
+Simple Consensus (SimpleMean)     = sum(values) / count
+Weighted Consensus (WeightedMean) = sum(value_i * normalized_weight_i)
+Median                             = middle value(s) of sorted values
+Spread                             = max - min
+StdDev (population)                = sqrt(sum((v_i - mean)^2) / count)
+CoefficientOfVariation             = StdDev / |SimpleMean|
+```
+
+A zero-mean edge case (e.g. included values straddling zero) never
+produces `NaN`/`Inf`: any ratio dividing by a zero denominator is defined
+as `0` (`percentOf`), since `encoding/json` rejects `NaN`/`Inf` outright and
+a corrupted downstream figure would be worse than a defined zero.
+
+**Weight handling** (`ValidateWeights`): every `Weight` must be finite and
+non-negative, and the included set's weights must sum to a strictly
+positive number — any failure invalidates the *entire* weighted-mean
+calculation (`Result.WeightsValid = false`, with the reason(s) in
+`Result.Errors`); this package never silently drops the offending
+`Input` or substitutes equal weights. Every other statistic (`SimpleMean`,
+`Median`, etc.) is still computed and returned regardless, since they don't
+depend on weights. **Weights are always normalized by dividing each by the
+sum of every supplied weight**, so `{3, 1}`, `{30, 10}`, and `{0.75, 0.25}`
+all produce an identical weighted mean — a deliberately simpler rule than
+`financial/earnings`' fraction-or-percentage-near-1-or-100 acceptance
+window, since dividing by the actual sum is always mathematically correct
+here and removes an entire class of "did my weights sum right?" caller
+error.
+
+#### Consensus/dispersion score
+
+`CalculateDispersion(stats Statistics) Dispersion` derives a deterministic
+agreement indicator from `Statistics.CoefficientOfVariation` alone:
+
+```go
+const dispersionScoreCVDivisor = 0.5
+
+Score = round(100 * (1 - CV/0.5)), clamped to [0, 100]
+```
+
+A CV of `0` (every included method agreed exactly) scores `100`; a CV at
+or beyond `0.5` floors at `0`. `Dispersion` returns both the raw measures
+(`CoefficientOfVariation`, `RelativeSpread = Spread / |SimpleMean|`) and
+the derived `Score`/`Level`:
+
+```go
+const (
+    LevelHighConsensus     Level = "HIGH_CONSENSUS"     // Score 70-100
+    LevelModerateConsensus Level = "MODERATE_CONSENSUS" // Score 40-69
+    LevelLowConsensus      Level = "LOW_CONSENSUS"       // Score 0-39
+)
+```
+
+**This is a fixed, documented heuristic transformation for human-facing
+display — not an industry-standard statistic**, and not a probability that
+the methods "agree" in any statistical sense.
+
+### `valuation/sensitivity`
+
+Reusable, deterministic sensitivity analysis over already-defined
+valuation calculations. **This package generates no scenarios itself** —
+every multiple, earnings adjustment, discount rate, and terminal growth
+rate analyzed here is caller-supplied.
+
+- **`MultipleSensitivity(earnings float64, multiples []float64) MultipleSensitivityResult`**
+  — one `MultiplePoint{Multiple, Value, Valid, Reason}` per multiple.
+  `Value = earnings * multiple`. A non-finite or non-positive multiple is
+  marked `Valid: false` with a `Reason` — **never silently dropped, never
+  computed under a substituted value.**
+- **`EarningsMultipleMatrix(scenarios []EarningsScenario, multiples []float64) Matrix`**
+  — a full 2D grid, `Rows[i][j] = EarningsScenarios[i].Earnings *
+  Multiples[j]`, with the same per-cell invalid-multiple handling (an
+  invalid column doesn't affect other columns or rows).
+- **`DCFSensitivity(forecastPeriods []dcf.ForecastPeriod, discountRates, terminalGrowthRates []float64, equityBridge dcf.EquityBridgeInput) DCFGrid`**
+  — for every `(discountRate, terminalGrowthRate)` combination, re-runs
+  `dcf.Calculate` and reports the full `dcf.Result`. **A combination where
+  `discountRate <= terminalGrowthRate` (or any other `dcf.Calculate`
+  validation failure) is marked `Valid: false` rather than computed** —
+  this package duplicates none of `dcf.Calculate`'s validation logic itself,
+  it only reports what that call already decided.
+
+### `valuation/report`
+
+A presentation-neutral, JSON-serializable report data model assembled from
+every other package's output. **This package computes nothing new** —
+`Build` only reshapes upstream `Result`/`Run`/`Result` values into one
+structure suitable for a future Vue UI, a JSON API response, PDF
+generation, or a CSV/export pipeline, none of which this package
+implements. No chart library types, no HTML, no PDF bytes — only plain
+structs, strings, and numbers.
+
+```go
+func Build(in BuildInput) Report
+func BuildConsensusInputs(run orchestrator.Run, weights map[valuation.Code]float64) []consensus.Input
+```
+
+Every `BuildInput` field is optional; a caller can build a minimal
+`Report` (e.g. just `Methods`) as easily as a complete end-to-end one —
+each `Report` section simply stays at its zero value when the
+corresponding input wasn't supplied.
+
+`Report` sections:
+
+- **`Summary`** — `ValuationDate` (caller-supplied, unparsed),
+  `SimpleConsensus`, `WeightedConsensus` (+ `WeightsValid`), `Median`,
+  `MethodRange`, `ConsensusLevel`/`ConsensusScore` (from
+  `consensus.Dispersion`), `ConsensusAvailable`. Field names deliberately
+  echo the package brief's caller-facing vocabulary ("Simple Consensus",
+  "Weighted Consensus") — **never "true value."**
+- **`Financial`** — one `FinancialPeriod` (`Revenue`, `EBITDA`,
+  `EBITDAMargin`, `SDE`, `GrossMargin`, each an available/value pair) per
+  supplied `metrics.Snapshot`, plus `NormalizedEBITDA`/`NormalizedSDE`
+  and caller-reshaped `GrowthMetrics`.
+- **`Methods`** — one `MethodComparisonRow` per method, in the same fixed
+  order as `orchestrator.Execute`: `Value`, `ValueType`, `Included`,
+  `Outcome`, `ExclusionReason`, `Weight` (the *normalized* weight actually
+  used in `WeightedConsensus`, re-derived via `consensus.ValidateWeights`
+  — not the caller's raw supplied weight), `Applicability`, `Assumptions`
+  (plain label/value pairs, e.g. `{"Multiple", "3.50x"}` — so a consumer
+  never needs to know five different `Input` schemas), `Steps` (the
+  method's own calculation trace), `Warnings`.
+- **`Adjustments`** — `Applied` adjustments and `EBITDABridge`/`SDEBridge`
+  as a flat, ordered `[]BridgeLine` (starting reported figure, each signed
+  adjustment delta, final normalized figure — `IsTotal` marks the two
+  running-total lines).
+- **`Sensitivity`** — `MultipleSensitivity`, `EarningsMultipleMatrix`, and
+  `DCFSensitivity`, each flattened to a single-level `[]Row` slice (never
+  nested), so a CSV export can emit any of them directly.
+- **`Series`** (`ChartSeries`) — `ValuationByMethod`, `RevenueHistory`,
+  `EBITDAHistory`, `SDEHistory`, `MarginHistory`, and a
+  `ValuationHistory` placeholder (empty until a future persistence layer
+  exists), each a plain `[]SeriesPoint{Label, Value}` with **no dependency
+  on any charting library.**
+
+Every field serializes cleanly via `encoding/json` (snake_case tags, no
+`NaN`/`Inf` — `valuation/consensus`'s zero-denominator convention makes
+this guaranteed rather than incidental); see
+[`valuation/report/report_test.go`](valuation/report/report_test.go)'s
+round-trip and NaN/Inf-safety tests.
+
+### `valuation/e2e`
+
+Not a reusable package — a single end-to-end deterministic fixture test
+([`valuation/e2e/e2e_test.go`](valuation/e2e/e2e_test.go)) exercising the
+**entire pipeline**, front to back, for one realistic small owner-operated
+HVAC service business:
+
+```
+normalized financial data
+  → financial/metrics
+  → financial/adjustments (normalized EBITDA/SDE bridges)
+  → financial/earnings (maintainable earnings)
+  → individual valuation methods (sde, ebitda, capitalization, dcf, netassets)
+  → valuation/applicability
+  → valuation/orchestrator
+  → valuation/consensus
+  → valuation/sensitivity
+  → valuation/report
+```
+
+using the same `fixtures/normalized_hvac_multi_year.json`,
+`fixtures/adjustments_by_business_type.json`, and
+`fixtures/valuation_by_business_type.json` fixtures every other package's
+own tests already use — no new fixture data was invented for this test.
+No database, no AI, no PDF, no network I/O anywhere in the chain; every
+stage is a pure function over the previous stage's output, and the test
+asserts on intermediate results at every stage, not only the final
+`report.Report`.
+
+This package exists specifically because it is the one place allowed to
+import nearly every package in the module at once; no other package
+should need to.
+
 ### `settings`
 
 A generic four-scope settings resolver:
@@ -1384,15 +1719,22 @@ The expected path is:
 2. The larger application supplies everything this repository deliberately
    omits: persistence (database-backed storage for aliases/rules per
    account/client/valuation and for `Settings`, snapshotting `Resolution`,
-   classification `Result`s, and `valuation.*` method `Result`s — see
+   classification `Result`s, `valuation.*` method `Result`s — see
    [Method versioning](#method-codes-and-versions) for why every method
-   result is version-stamped specifically for this), HTTP handlers, auth,
-   multi-tenancy, document parsing (PDF/XLSX/CSV/QuickBooks), and the
-   higher-level valuation logic layered on top of the individual methods
-   (which methods apply to a given business, a multi-method consensus
-   value, sensitivity analysis, report rendering). It may also eventually
-   supply a statistical or AI/LLM-based classifier that implements the
-   same `[]RawLineItem` + config → `[]Result` boundary
+   result is version-stamped specifically for this — plus
+   `applicability.Results`, `orchestrator.Run`, `consensus.Result`, and
+   `report.Report`), HTTP handlers, auth, multi-tenancy, document parsing
+   (PDF/XLSX/CSV/QuickBooks), actual chart/PDF/UI rendering of a
+   `report.Report`, and AI/LLM assistance. The deterministic valuation
+   logic itself — which methods apply to a given business
+   (`valuation/applicability`), running a selected set of methods
+   (`valuation/orchestrator`), a multi-method consensus value
+   (`valuation/consensus`), sensitivity analysis
+   (`valuation/sensitivity`), and a presentation-neutral report shape
+   (`valuation/report`) — already lives in this repository; the larger
+   application consumes it rather than reimplementing it. It may also
+   eventually supply a statistical or AI/LLM-based classifier that
+   implements the same `[]RawLineItem` + config → `[]Result` boundary
    `classification.Classify` implements today.
 3. Because every exported function here is a pure function over
    JSON-compatible Go structs, integration is expected to be closer to
@@ -1422,45 +1764,123 @@ go vet ./...
 
 With `financial`, `financial/classification`, `financial/reconciliation`,
 `financial/metrics`, `financial/adjustments`, `financial/earnings`,
-`valuation` (and its five method subpackages), and `settings` all in
-place, every method now produces a version-stamped, fully-explained
-`Result` independently — but nothing yet decides *which* methods apply to
-a given business, combines multiple methods' results into a single
-consensus value, or explains how sensitive that value is to its
-assumptions. The next natural addition is a **method
-applicability/consensus** package (e.g. `valuation/consensus/` or
-`valuation/orchestrator/`) that consumes a resolved `settings.Resolution`
-(which methods are enabled, per `settings.Method`/`MethodEnabled`) plus
-each enabled method's `Result`, and:
+`valuation` (and its five method subpackages), `valuation/profile`,
+`valuation/applicability`, `valuation/orchestrator`, `valuation/consensus`,
+`valuation/sensitivity`, `valuation/report`, and `settings` all in place,
+**the deterministic valuation core described in this README is now
+complete**: every method produces a version-stamped `Result`; applicability
+scores which methods suit a given business; the orchestrator runs a
+selected set without one method's failure affecting another; consensus
+combines results into simple/weighted means, a range, and a dispersion
+indicator; sensitivity analysis explores multiples/earnings/DCF-rate grids;
+and the report package reshapes all of it into one presentation-neutral,
+JSON-serializable structure — see
+[`valuation/e2e/e2e_test.go`](valuation/e2e/e2e_test.go) for the full chain
+exercised end to end against a realistic fixture.
 
-- decides which methods are *applicable* to a given business at all (e.g.
-  a DCF needs a forecast the caller may not have supplied; an adjusted net
-  asset value method may be judged inapplicable to a strong going-concern
-  business, or vice versa for a distressed one) — likely surfaced as its
-  own structured `Applicability`/reason type, following this repository's
-  established "never a bare boolean" convention
-  (`reconciliation.Status`, `valuation.IssueSeverity`);
-- combines multiple applicable methods' `Result`s — which, per
-  [Enterprise value vs. equity value](#enterprise-value-vs-equity-value),
-  may arrive as a mix of `enterprise_value`, `equity_value`, and
-  `asset_value` results — into a single weighted or ranged consensus
-  value, with the same non-negotiable explainability every package here
-  has: which methods contributed, at what weight, and why;
-- and/or performs sensitivity analysis (e.g. how the DCF's enterprise
-  value moves across a discount-rate/terminal-growth-rate grid) as a pure
-  function over an existing `dcf.Input`, without this repository ever
-  reaching into scenario-generation or forecasting itself.
+Nothing further can be added to this repository *as a deterministic
+module* without crossing into scope this repository has deliberately
+excluded from the start (see
+[What this project intentionally does not contain](#what-this-project-intentionally-does-not-contain)).
+The next steps are integration, not new packages:
 
-It should remain just as pure and infrastructure-free as the existing
-packages: data in, consensus/sensitivity results out, no persistence, no
-UI, no knowledge of where the inputs came from. Report rendering, a data
-model for persisting a full valuation (methods + consensus + sensitivity)
-as a single historical record, AI/LLM assistance, and a database remain
-out of scope for that module too — see
+1. **Persistence.** A consuming application needs to store
+   `settings.Settings`/`Resolution`, classification `Result`s, individual
+   method `Result`s (version-stamped specifically for this — see
+   [Method versioning](#method-codes-and-versions)), `applicability.Results`,
+   `orchestrator.Run`, `consensus.Result`, and `report.Report` as
+   historical records tied to its own account/client/valuation entities.
+   This repository defines the shapes; it does not decide how they're
+   stored.
+2. **Document parsing.** Turning a real trial balance, QuickBooks export,
+   or PDF financial statement into `[]financial.RawLineItem` is exactly the
+   kind of OCR/document-understanding problem this repository's "no
+   PDF/OCR" constraint rules out — that's a separate ingestion layer that
+   produces this repository's actual input.
+3. **HTTP/API and UI.** `report.Report` is JSON-serializable specifically
+   so a future API handler can return it directly and a future Vue UI (or
+   any other frontend) can render it — building either is explicitly out
+   of scope here.
+4. **AI/LLM assistance**, if ever added (e.g. suggesting adjustments, or
+   explaining a report in natural language), should consume this
+   repository's outputs as context, never replace its deterministic
+   calculations — `applicability.Score`/`consensus.Dispersion.Score` must
+   remain auditable point totals a reviewer can trace by hand, not
+   something an LLM call decides.
+
+Until that integration happens, this repository should keep gaining
+domain modules as pure, dependency-free Go packages following the same
+input/output discipline — see
 [How this is intended to be integrated later](#how-this-is-intended-to-be-integrated-later).
 
-**Unresolved domain assumptions left for that module (or a later revision
-of an earlier package) to address:**
+**Unresolved domain assumptions left for a later revision of an earlier
+package (or the integration layer above) to address:**
+
+- **`valuation/consensus` does not itself enforce a single value type
+  across included methods.** `Result.MixedValueTypes` warns when an
+  `enterprise_value`, `equity_value`, and `asset_value` are averaged
+  together (exactly what happens if a caller equal-weights all five
+  methods without bridging EBITDA/DCF to equity first — see the `e2e`
+  fixture, which deliberately does this and asserts on the resulting
+  warning rather than hiding it), but nothing stops a caller from doing it
+  anyway. A future integration layer should decide whether to bridge
+  every enterprise-value method to equity before consensus by default, or
+  surface `MixedValueTypes` prominently enough that a reviewer catches it.
+- **`valuation/applicability`'s point deltas
+  (`pointsStrongPositive`/`pointsPositive`/etc. = 25/15/8) are a first-pass
+  heuristic scale**, not derived from any empirical study of which
+  business characteristics actually predict a method's real-world
+  reliability. A future revision with real user feedback on applicability
+  accuracy should feel free to retune these constants — they're
+  centralized in `valuation/applicability/rules.go` specifically so that's
+  a small, contained change.
+- **`valuation/orchestrator.Request.MinApplicabilityLevel` filtering is
+  opt-in and all-or-nothing** (a method either runs or is fully excluded);
+  there's no "run it anyway but flag it as low-applicability" middle
+  ground beyond what `MethodOutcome.Applicability` already exposes for a
+  caller to act on itself.
+- `financial/adjustments` does not itself compute a market-rate
+  replacement-owner salary for `TypeOwnerCompensationNormalization` — the
+  caller supplies the already-computed *difference* as `Amount`. A future
+  module could add a market-compensation-lookup helper, but that would
+  introduce an external data dependency (salary survey data) this
+  repository's "no external services" constraint currently rules out.
+- `financial/earnings`'s `StrategyTrendAdjusted` is a plain OLS linear fit
+  with no outlier handling, level-shift detection, or seasonality —
+  deliberately left simple per this module's brief ("if domain assumptions
+  become subjective, do not implement it yet"). A future module needing
+  more sophistication (e.g. excluding a one-time COVID-affected year from
+  a trend fit) should treat that as a caller-side observation-selection
+  decision, not something this package infers automatically.
+- `financial/adjustments` does not cap or sanity-check adjustment magnitude
+  against the base metric (e.g. an adjustment larger than EBITDA itself
+  producing a sign-flipped "normalized EBITDA" is allowed through
+  uncaught). This mirrors `financial/metrics`' general stance of computing
+  exactly what the formula says and leaving business-judgment plausibility
+  review to a human or a future review-workflow layer, rather than this
+  package guessing at what counts as "too large."
+- **`valuation/capitalization` does not verify its earnings base matches
+  its own equity-value labeling.** The package always reports
+  `ValueTypeEquity`, which is correct for an SDE-like or owner-net-income
+  earnings base but would be a mislabeled *enterprise* value if a caller
+  supplied a debt-free/EBIT-like earnings figure instead — this package
+  has no way to detect which kind of figure it was handed. A future
+  module (or a documentation-only convention enforced at the call site)
+  should make explicit which earnings base each caller is expected to
+  supply, rather than this package guessing.
+- **No method validates its multiple/rate against a plausible range.** A
+  multiple of 50x or a capitalization rate of 200% both pass validation
+  today (only sign/finiteness/ordering are checked) — implausible-but-
+  technically-valid assumptions are allowed through uncaught, mirroring
+  `financial/adjustments`' identical stance on unchecked adjustment
+  magnitude above. A future review-workflow layer, not this package, is
+  expected to catch "technically valid but implausible" input.
+- **The DCF's mid-year convention is a single global on/off flag**
+  (`Input.MidYearConvention`), applied identically to every forecast
+  period and the terminal value. A more granular model (e.g. mid-year for
+  operating cash flow but end-of-year for a known one-time terminal
+  transaction) is not supported and would need a per-period override this
+  package's `Input` does not currently expose.
 
 - `financial/adjustments` does not itself compute a market-rate
   replacement-owner salary for `TypeOwnerCompensationNormalization` — the
