@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math"
 	"reflect"
+	"sort"
 
 	"github.com/themurtez/go-valuate/financial"
 	"github.com/themurtez/go-valuate/financial/adjustments"
@@ -70,11 +71,20 @@ type InvalidDecision struct {
 // were rejected, which required items remain unresolved, and the resulting
 // corrected domain structures.
 type ApplyResult struct {
-	// Applied is every Decision that was successfully applied, in
-	// Decisions' original order (see AppliedDecision).
+	// Applied is every Decision that was successfully applied, in Apply's
+	// deterministic DOMAIN application order, not necessarily Decisions'
+	// original slice order: every KindStructure decision is processed (and
+	// so appears here) before every other kind, since a row's structural
+	// RowKind determines whether a KindClassification decision against the
+	// same row is even valid (see decisionPhase). Decisions within the same
+	// phase preserve their original relative order. Each AppliedDecision
+	// still carries its own ItemID/Kind, so original decision identity is
+	// never lost even though array position no longer mirrors input order.
 	Applied []AppliedDecision `json:"applied,omitempty"`
 	// Invalid is every Decision that failed validation and was not
-	// applied, in Decisions' original order.
+	// applied, in the same deterministic domain application order Applied
+	// uses (see Applied's doc comment) — NOT necessarily Decisions'
+	// original slice order.
 	Invalid []InvalidDecision `json:"invalid,omitempty"`
 	// UnresolvedRequired is every ReviewItem from the plan that has
 	// Required == true and remains unresolved after applying every valid
@@ -160,7 +170,21 @@ func Apply(source Source, plan Plan, decisions []Decision) ApplyResult {
 	mappedIndex := indexMappedLineItemsBySourceID(result.MappedLineItems)
 	adjustmentIndex := indexAdjustmentsByID(result.Adjustments)
 
-	for i, d := range decs {
+	// Process decisions in deterministic DOMAIN order (see
+	// decisionApplicationOrder) rather than caller slice order: a
+	// KindStructure decision against a row must be validated/applied before
+	// a KindClassification decision against the same row, since the row's
+	// structural RowKind determines whether the classification decision is
+	// even valid (see validateClassificationDecision). order[k] is the
+	// index into decs (== the caller's original decisions slice position,
+	// after cloning) to process k-th; every seen/duplicate lookup below
+	// still keys off that ORIGINAL index, so duplicate/conflict detection
+	// (always between decisions sharing one ItemID, hence one Kind, hence
+	// one phase) is completely unaffected by this reordering.
+	order := decisionApplicationOrder(decs, itemByID)
+
+	for _, i := range order {
+		d := decs[i]
 		item, itemOK := itemByID[d.ItemID]
 
 		var issues []Issue
@@ -168,8 +192,9 @@ func Apply(source Source, plan Plan, decisions []Decision) ApplyResult {
 			issues = append(issues, Issue{ItemID: d.ItemID, Code: IssueConflictingDecision, Severity: SeverityIssueError,
 				Message: fmt.Sprintf("item %q has %d conflicting decisions in this Apply call", d.ItemID, len(dupIdxs))})
 		} else if len(dupIdxs) > 1 && dupIdxs[0] != i {
-			// An exact duplicate repeat: only the first occurrence applies;
-			// later identical repeats are reported as duplicates too, for
+			// An exact duplicate repeat: only the first occurrence (by
+			// ORIGINAL slice position, not processing order) applies; later
+			// identical repeats are reported as duplicates too, for
 			// visibility, but are not independently re-applied.
 			issues = append(issues, Issue{ItemID: d.ItemID, Code: IssueDuplicateItemID, Severity: SeverityIssueWarning,
 				Message: fmt.Sprintf("item %q has %d identical repeated decisions in this Apply call", d.ItemID, len(dupIdxs))})
@@ -179,7 +204,7 @@ func Apply(source Source, plan Plan, decisions []Decision) ApplyResult {
 			issues = append(issues, Issue{ItemID: d.ItemID, Code: IssueUnknownItemID, Severity: SeverityIssueError,
 				Message: fmt.Sprintf("no review item with ID %q exists in this plan", d.ItemID)})
 		} else {
-			issues = append(issues, validateDecision(d, item)...)
+			issues = append(issues, validateDecision(d, item, result.MappedLineItems, mappedIndex)...)
 		}
 
 		if HasErrors(issues) {
@@ -200,9 +225,10 @@ func Apply(source Source, plan Plan, decisions []Decision) ApplyResult {
 
 		// Skip re-applying a later identical duplicate: it was already
 		// validated as non-conflicting above and flagged as a warning: the
-		// FIRST occurrence in the slice is the one that actually mutates
-		// state, so behavior is deterministic and independent of how many
-		// identical copies were supplied.
+		// FIRST occurrence (by ORIGINAL slice position) is the one that
+		// actually mutates state, so behavior is deterministic and
+		// independent of how many identical copies were supplied, and of
+		// this loop's processing order.
 		if dupIdxs := seen[d.ItemID]; len(dupIdxs) > 1 && dupIdxs[0] != i {
 			continue
 		}
@@ -226,6 +252,60 @@ func Apply(source Source, plan Plan, decisions []Decision) ApplyResult {
 	}
 
 	return result
+}
+
+// decisionPhase ranks a ReviewItem.Kind into a small, fixed processing
+// phase, lowest first. This is what makes Apply's semantic result
+// independent of the caller's decision slice order: within one Apply call,
+// every decision in an earlier phase is fully validated and applied before
+// any decision in a later phase is even validated.
+//
+// Only one real cross-kind dependency exists in this package today:
+// KindStructure -> KindClassification. A row's structural financial.RowKind
+// (HEADING/SUBTOTAL/TOTAL vs. NORMAL) determines whether a classification
+// override against that same row is even valid (see
+// validateClassificationDecision/IssueStructuralRowOverride) — so structure
+// decisions must resolve first. No other kind reads or depends on state
+// another kind's decision mutates: KindAdjustment only touches
+// adjustments.Adjustment (keyed by AdjustmentID, never by row), KindPeriod/
+// KindOCRNumeric/KindOCRText only touch CorrectedPeriods/CorrectedNumerics/
+// display values, and KindValuationAssumption/KindReconciliation mutate no
+// corrected domain structure at all. Inventing additional phases for those
+// kinds would add ordering with no real dependency behind it, so they all
+// share one "independent" phase below KindStructure and above nothing.
+func decisionPhase(kind Kind) int {
+	switch kind {
+	case KindStructure:
+		return 0
+	default:
+		return 1
+	}
+}
+
+// decisionApplicationOrder returns, for decs, the indices into decs in the
+// deterministic DOMAIN order Apply should process them: primarily by
+// decisionPhase (see its doc comment) of the TARGETED ReviewItem's Kind,
+// stable within a phase (ties broken by decs' own original order) so
+// decisions that don't cross a real phase boundary keep behaving exactly as
+// before this ordering was introduced. A decision whose ItemID doesn't
+// resolve to a known item (itemByID) sorts into the default/independent
+// phase — Apply's own unknown-item-ID validation reports that problem
+// exactly as it always has, regardless of processing order.
+func decisionApplicationOrder(decs []Decision, itemByID map[string]ReviewItem) []int {
+	order := make([]int, len(decs))
+	for i := range decs {
+		order[i] = i
+	}
+	phaseOf := func(i int) int {
+		if item, ok := itemByID[decs[i].ItemID]; ok {
+			return decisionPhase(item.Kind)
+		}
+		return decisionPhase("")
+	}
+	sort.SliceStable(order, func(a, b int) bool {
+		return phaseOf(order[a]) < phaseOf(order[b])
+	})
+	return order
 }
 
 // resolvedStatusFor maps an applied Action to the item Status it leaves
@@ -276,9 +356,13 @@ func decisionsEqual(a, b Decision) bool {
 
 // validateDecision implements section 15's decision-validation rules for a
 // single (non-duplicate-conflict) Decision against its already-resolved
-// ReviewItem. Returns zero or more Issues; the decision is applied only if
-// none of them is SeverityIssueError.
-func validateDecision(d Decision, item ReviewItem) []Issue {
+// ReviewItem. mappedLineItems/mappedIndex reflect the CURRENT
+// (possibly-already-corrected-by-an-earlier-decision-in-this-same-Apply-
+// call) state, so a classification decision can see whether an earlier
+// KindStructure decision already turned this row's Kind back to
+// RowKindNormal. Returns zero or more Issues; the decision is applied only
+// if none of them is SeverityIssueError.
+func validateDecision(d Decision, item ReviewItem, mappedLineItems []financial.MappedLineItem, mappedIndex map[string]int) []Issue {
 	var issues []Issue
 
 	if !actionAllowedForKind(item.Kind, d.Action) {
@@ -289,7 +373,7 @@ func validateDecision(d Decision, item ReviewItem) []Issue {
 
 	switch item.Kind {
 	case KindClassification:
-		issues = append(issues, validateClassificationDecision(d)...)
+		issues = append(issues, validateClassificationDecision(d, item, mappedLineItems, mappedIndex)...)
 	case KindOCRNumeric:
 		issues = append(issues, validateOCRNumericDecision(d)...)
 	case KindStructure:
@@ -339,7 +423,7 @@ func oneOf(action Action, allowed ...Action) bool {
 	return false
 }
 
-func validateClassificationDecision(d Decision) []Issue {
+func validateClassificationDecision(d Decision, item ReviewItem, mappedLineItems []financial.MappedLineItem, mappedIndex map[string]int) []Issue {
 	if d.Action != ActionOverride {
 		return nil
 	}
@@ -351,7 +435,40 @@ func validateClassificationDecision(d Decision) []Issue {
 		return []Issue{{ItemID: d.ItemID, Code: IssueInvalidCode, Severity: SeverityIssueError,
 			Message: fmt.Sprintf("%q is not a recognized canonical financial.Code", d.Classification.Code)}}
 	}
+	if isStructuralRowKind(effectiveRowKind(item, mappedLineItems, mappedIndex)) {
+		return []Issue{{ItemID: d.ItemID, Code: IssueStructuralRowOverride, Severity: SeverityIssueError,
+			Message: "this row is structural (HEADING, SUBTOTAL, or TOTAL); a classification override cannot assign it a financial account code — use a STRUCTURE decision to change its row kind to NORMAL first"}}
+	}
 	return nil
+}
+
+// effectiveRowKind reports the CURRENT financial.RowKind for a
+// KindClassification item's underlying row: the corrected MappedLineItem's
+// Kind when the row is present in mappedLineItems (reflecting any
+// KindStructure decision already applied earlier in this same Apply call),
+// falling back to the item's own Build-time snapshot
+// (ReviewItem.Classification.Kind) when the row cannot be found there.
+func effectiveRowKind(item ReviewItem, mappedLineItems []financial.MappedLineItem, mappedIndex map[string]int) financial.RowKind {
+	if idx, ok := mappedIndex[item.SourceRowID]; ok {
+		return mappedLineItems[idx].Kind
+	}
+	if item.Classification != nil {
+		return item.Classification.Kind
+	}
+	return financial.RowKindNormal
+}
+
+// isStructuralRowKind reports whether kind is one of the three structural
+// row kinds (HEADING, SUBTOTAL, TOTAL) that must never be silently turned
+// back into an ordinary financial row by a classification decision — see
+// IssueStructuralRowOverride.
+func isStructuralRowKind(kind financial.RowKind) bool {
+	switch kind {
+	case financial.RowKindHeading, financial.RowKindSubtotal, financial.RowKindTotal:
+		return true
+	default:
+		return false
+	}
 }
 
 func validateOCRNumericDecision(d Decision) []Issue {

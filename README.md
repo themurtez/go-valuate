@@ -90,7 +90,9 @@ and handed into a run rather than looked up mid-calculation (see
 [Settings snapshot contract](#settings-snapshot-contract)).
 
 **What is deliberately absent from every stage above, and from this
-repository entirely:** no database, no HTTP/API layer, no AI/LLM. Deterministic
+repository entirely:** no database, no HTTP/API layer, and no AI/LLM
+beyond one narrow, opt-in, strictly-supervised exception — see [AI
+fallback classification](#ai-fallback-classification) below. Deterministic
 tabular ingestion (`ingestion`, `ingestion/csv`, `ingestion/xlsx`, text-based
 PDF support in [`ingestion/pdf`](#ingestionpdf), and opt-in local-Tesseract
 OCR for scanned PDFs — see
@@ -122,7 +124,13 @@ contains **no**:
 - users, organizations, or tenants
 - Stripe, subscriptions, or billing
 - Vue or any frontend code
-- AI/LLM integrations, embeddings, or AI-based document understanding
+- AI/LLM document understanding, OCR correction, add-back recommendations,
+  valuation method/multiple selection, DCF forecasting, or report narrative
+  generation — the one narrow exception is `financial/classification/ai`'s
+  optional, closed-set, mandatory-human-review classification fallback (see
+  [AI fallback classification](#ai-fallback-classification) below), which
+  never bypasses the deterministic classification pipeline or the `review`
+  domain layer
 - cloud/storage integrations
 - QuickBooks/Xero or other accounting-software API integrations
 - external valuation data sources
@@ -185,10 +193,14 @@ single maintainable-earnings figure across historical periods is
 implemented in `financial/earnings`; the individual valuation methods
 themselves (SDE multiple, EBITDA multiple, capitalization of earnings, DCF,
 adjusted net asset value) are implemented in `valuation` and its
-per-method subpackages — see below for all six. Method applicability
-rules, a multi-method consensus/weighting engine, sensitivity analysis,
-reporting/UI, AI/LLM assistance, a database, and QuickBooks/Xero-style
-accounting-software integrations are all still explicitly **out of scope
+per-method subpackages — see below for all six; optional, closed-set,
+mandatory-human-review AI classification fallback is implemented in
+`financial/classification/ai` and `financial/classification/ai/openai` —
+see [AI fallback classification](#ai-fallback-classification). Method
+applicability rules, a multi-method consensus/weighting engine, sensitivity
+analysis, reporting/UI, every other form of AI/LLM assistance, a database,
+and QuickBooks/Xero-style accounting-software integrations are all still
+explicitly **out of scope
 for this repository** at this stage. They are expected to be built as
 later modules, or in the consuming application, on top of the types and
 packages defined here — see
@@ -3151,6 +3163,9 @@ persist historical valuations").
 | Report schema | `report.SchemaVersion`, echoed on `report.Report.SchemaVersion` | This package's own `Report` shape — distinct from any upstream package's version, which is separately echoed inside each section |
 | Settings resolution schema | `settings.ResolutionSchemaVersion`, echoed on `settings.Resolution.SchemaVersion` | The `Values`/`Sources` shape `Resolve` produces |
 | Review schema | `review.SchemaVersion`, echoed on `review.Plan.Version` | `ReviewItem`/`Plan`/`Decision`/`ApplyResult` shapes and the deterministic ID/severity/readiness rules that produce them (`review`) |
+| AI request/response schema | `ai.RequestSchemaVersion`, echoed on `ai.Provenance.RequestSchemaVersion` | The `Request`/`Response` wire shape `financial/classification/ai` sends to/expects from a `Classifier` |
+| AI fallback orchestration | `ai.OrchestrationVersion`, echoed on `ai.Provenance.OrchestrationVersion` | The trigger/fallback/safety decision logic in `ClassifyWithFallback`/`ClassifyBatchWithFallback` (which `FallbackMode` runs AI when, structural-row skipping, disagreement handling) |
+| OpenAI adapter | `openai.AdapterVersion`, echoed on `ai.Provenance.AdapterVersion` | This specific provider adapter's prompt-construction/response-parsing logic (`financial/classification/ai/openai`) |
 
 **The rule for bumping a version:** whenever a formula, an availability/
 validation rule, a default, a sign convention, or an output shape changes
@@ -3183,6 +3198,7 @@ unverified incidental property of the standard library).
 | `valuation/consensus.Result.Requested` / `Included` / `Conversions` | `Requested` preserves caller order exactly; `Included` and `Conversions` preserve that same order (with excluded entries removed from `Included` only) |
 | `valuation/report.Report.Methods` | Same fixed method order (`methodOrder`, mirroring the orchestrator's) |
 | `review.Plan.Items` | Primarily by `Severity` (`BLOCKING`, `ERROR`, `WARNING`, `INFO`), then by `Kind` (string order), then by `SourceRowID`, then by `ID` — a real `sort.SliceStable` over exactly these keys (`review`'s `sortItems`), never left to `Build`'s internal append order |
+| `ai.BatchOutcome.Outcomes` | Input order preserved exactly: `Outcomes[i]` always corresponds to the `i`-th row passed to `ClassifyBatchWithFallback` |
 
 ## Error taxonomy
 
@@ -3215,7 +3231,8 @@ message strings:
   (`IssueUnknownItemID`, `IssueWrongPayloadKind`, `IssueInvalidAction`,
   `IssueMissingPayload`, `IssueInvalidCode`, `IssueInvalidRowKind`,
   `IssueNonFiniteAmount`, `IssueMalformedPeriod`, `IssueDuplicateItemID`,
-  `IssueConflictingDecision`, `IssueIncompatibleDecision`), a third system
+  `IssueConflictingDecision`, `IssueIncompatibleDecision`,
+  `IssueStructuralRowOverride`), a third system
   rather than reusing either of the two above: `review`'s problem domain
   (unknown review-item IDs, wrong decision-payload-for-item-kind,
   conflicting duplicate decisions) doesn't overlap with `valuation`'s
@@ -3224,6 +3241,18 @@ message strings:
   serve `review` would either leak review-specific codes into
   `financial`/`valuation` or vice versa — the same reasoning above applied
   a third time.
+- **`ai.Issue{RowID, Code ai.IssueCode, Severity, Message}`** —
+  `financial/classification/ai`'s own separate system (`AI_DISABLED`,
+  `AI_PROVIDER_UNAVAILABLE`, `AI_TIMEOUT`, `AI_PROVIDER_ERROR`,
+  `AI_INVALID_RESPONSE`, `AI_INVALID_CODE`, `AI_EMPTY_RESPONSE`,
+  `AI_RATE_LIMITED`, `AI_CONTEXT_TOO_LARGE`, `AI_BUDGET_EXCEEDED`,
+  `AI_STRUCTURAL_ROW_SKIPPED`), a fourth system for the same reason as the
+  three above: a provider-call failure or an invalid AI response is a
+  fundamentally different problem domain from a review-decision validation
+  problem, an adjustment-set consistency problem, or a valuation-input
+  validity problem, and this package must remain importable/testable
+  without ever pulling in `review`/`valuation`/`adjustments`' own error
+  vocabularies (or vice versa).
 
 Two structured-but-not-error-severity vocabularies exist alongside these
 and are not folded in, since they already serve the "stable, matchable"
@@ -3316,12 +3345,14 @@ The next steps are integration, not new packages:
    so a future API handler can return it directly and a future Vue UI (or
    any other frontend) can render it — building either is explicitly out
    of scope here.
-4. **AI/LLM assistance**, if ever added (e.g. suggesting adjustments, or
-   explaining a report in natural language), should consume this
-   repository's outputs as context, never replace its deterministic
+4. **AI/LLM assistance**, if ever added further (e.g. suggesting
+   adjustments, or explaining a report in natural language), should consume
+   this repository's outputs as context, never replace its deterministic
    calculations — `applicability.Score`/`consensus.Dispersion.Score` must
    remain auditable point totals a reviewer can trace by hand, not
-   something an LLM call decides.
+   something an LLM call decides. One such capability already exists,
+   scoped narrowly to classification: see
+   [AI fallback classification](#ai-fallback-classification).
 
 Until that integration happens, this repository should keep gaining
 domain modules as pure, dependency-free Go packages following the same
@@ -3531,16 +3562,23 @@ decision/readiness layer sitting immediately ahead of "proceed to
 valuation." The remaining gaps are the ones this repository has
 consistently scoped out at every phase (see
 [What this project intentionally does not contain](#what-this-project-intentionally-does-not-contain)):
-a persistence layer, HTTP/API handlers and auth, an actual rendered review
-UI (the domain metadata AND now the full review-domain model needed to
+a persistence layer, HTTP/API handlers and auth, and an actual rendered
+review UI (the domain metadata AND the full review-domain model needed to
 build one — `review.Plan`, `review.ReviewItem`, `review.Decision`,
 `review.ApplyResult`, `review.Readiness` — are already in place; only the
-UI itself, Vue or otherwise, is out of scope here), and AI/LLM assistance
-of any kind (document understanding, OCR correction, classification,
-automatic adjustment suggestions, or otherwise). Each remains a natural
+UI itself, Vue or otherwise, is out of scope here). Each remains a natural
 candidate for a future module or application layer built on top of the
 types and packages already defined here, but none should be started as
 part of this repository's own scope.
+
+One exception has since been added: **optional, human-reviewed AI
+classification fallback** (see [AI fallback classification](#ai-fallback-classification)
+below) — strictly behind a provider-neutral interface, closed-set,
+mandatory-review, never a replacement for the deterministic pipeline. Every
+OTHER form of AI/LLM assistance (document understanding, OCR correction,
+add-back recommendations, valuation method/multiple selection, DCF
+forecasting, report narrative generation) remains explicitly out of scope —
+see that section's own "Explicit non-goals" for the full list.
 
 ## `review`
 
@@ -3670,7 +3708,7 @@ typed-payload design rather than a generic value bag. `Action` is one of
 
 | Kind | Allowed actions | `OVERRIDE` payload |
 |---|---|---|
-| `CLASSIFICATION` | accept, override, ignore | `ClassificationDecision{Code}` — validated via `financial.IsValidCode` |
+| `CLASSIFICATION` | accept, override, ignore | `ClassificationDecision{Code}` — validated via `financial.IsValidCode`; `override` is additionally rejected (`IssueStructuralRowOverride`) when the row's current `financial.RowKind` is structural (see "Classification decisions never change row structure" below) |
 | `OCR_TEXT` | accept, override, reject | *(text override carried as a display value only — no domain structure to correct beyond the label)* |
 | `OCR_NUMERIC` | accept, override, reject | `OCRNumericDecision{Amount}` — must be finite |
 | `PERIOD` | accept, override | `PeriodDecision{Period}` — must be non-empty |
@@ -3708,6 +3746,28 @@ rejected numeric item is simply absent — treated exactly like a cell that
 never parsed); and `CorrectedPeriods map[string]financial.Period`. Every
 returned collection is a fresh copy — mutating `ApplyResult`'s returned
 slices/maps never leaks back into the caller's original `Source`.
+
+**Classification decisions never change row structure.** A `CLASSIFICATION`
+item can exist even for a structural row (`buildClassificationItems` does
+not skip heading/subtotal/total rows, so `Policy.ReviewAllClassifications`
+can surface one), but an `ACTION_OVERRIDE` against it is rejected with
+`IssueStructuralRowOverride` whenever the row's current `financial.RowKind`
+is `HEADING`, `SUBTOTAL`, or `TOTAL` — assigning a financial code to such a
+row would silently flip it to `RowStatusNormal` and double-count it during
+`financial.Normalize`. `ACCEPT`/`IGNORE` on that same item remain valid
+(they never assign a code or change structural semantics). Structural
+semantics can only be changed through a `STRUCTURE` review decision
+(`applyStructureDecision`, via `RowKind` ↔ `RowStatus` translation above);
+once an explicit `STRUCTURE` override changes a row to `RowKindNormal`, a
+subsequent `CLASSIFICATION` override on that same row applies normally.
+
+**`Apply` resolves dependent decisions in deterministic domain order.**
+Structural decisions are applied before classification decisions, so
+equivalent decision sets produce the same result regardless of caller array
+order — `ApplyResult.Applied`/`.Invalid` reflect this same domain order
+rather than raw input order (see each field's own doc comment). Duplicate/
+conflicting-decision detection is unaffected: it still keys off each
+decision's original slice position.
 
 ### Readiness
 
@@ -3791,3 +3851,380 @@ again → `financial.Normalize` → `financial/metrics.Calculate` →
 `financial/adjustments.Apply` → `financial/earnings.Calculate` →
 `valuation/sde.Calculate`, producing a real priced equity value only once
 every blocking review item is resolved.
+
+## AI fallback classification
+
+The first (and, for now, only) AI capability in this repository: an
+**entirely optional** classification fallback that runs only when the
+deterministic pipeline (`financial/classification`) cannot produce an
+acceptable result, and whose output is never trusted automatically — it
+becomes a `review.ReviewItem` like anything else and requires an explicit
+human decision before it can affect a normalized dataset.
+
+```
+Raw line
+   ↓
+Deterministic classifier
+   ↓
+Acceptable result?
+ ├─ yes → classification result
+ └─ no
+      ↓
+  optional AI fallback
+      ↓
+ AI suggestion
+      ↓
+ review.Build
+      ↓
+ human confirmation
+      ↓
+ normalize
+```
+
+**AI suggestions are never authoritative financial mappings until confirmed
+through the review domain.** Nothing in `financial/classification/ai`
+mutates a `RawLineItem`, a `RowKind`, source provenance, period values, a
+normalized `FinancialDataset`, or a valuation assumption — it proposes
+classification metadata only, and `financial.Normalize` never runs against
+anything an AI suggestion touched until a `review.Decision` has accepted or
+overridden it.
+
+**Package layout:**
+
+- **`financial/classification/ai`** — the provider-neutral boundary and all
+  orchestration logic. No dependency on any AI SDK; imports only
+  `financial` and `financial/classification`. Exported surface:
+  `Classifier` (the interface every provider adapter implements),
+  `Request`/`Response`/`AllowedCode`/`ContextRow`/`DeterministicSummary`
+  (the wire contract), `Policy`/`FallbackMode` (trigger/cost-control
+  policy), `ClassifyWithFallback`/`ClassifyBatchWithFallback` (the
+  orchestration entry points), `Provenance`/`Disagreement`/`FallbackOutcome`/
+  `BatchOutcome` (the audit/result shapes), `ValidateResponse` (closed-set
+  enforcement), `Issue`/`IssueCode` (this package's own error taxonomy),
+  `FakeClassifier` (a credential-free test double), `BatchClassifier` (an
+  optional batching capability a provider may additionally implement).
+- **`financial/classification/ai/openai`** — one concrete provider adapter,
+  using the official `github.com/openai/openai-go/v2` SDK (Apache-2.0
+  licensed). Every OpenAI-specific type is confined to this subpackage —
+  nothing outside it ever imports `openai-go`, so the rest of the
+  repository (including every other package's tests) builds and runs with
+  zero network access and zero credentials.
+
+### Core principle: AI is a fallback, never a replacement
+
+The classification precedence order established in
+[`financial/classification`](#financialclassification)
+is unchanged and always runs in full first:
+
+```
+explicit mapping → alias → context rule → phrase rule → AI fallback (optional) → UNKNOWN
+```
+
+`ai.ClassifyWithFallback`/`ClassifyBatchWithFallback` always call
+`classification.Classify`/`ClassifyBatch` first, unconditionally. AI is
+consulted only per `Policy.Mode`, and even then only ever REPLACES the row's
+usable result when the deterministic side had nothing better (`UNKNOWN`, or
+— under `AIForce`/`AIBelowConfidence` — no competing non-UNKNOWN code); see
+[Disagreement](#ai-vs-deterministic-disagreement) below for what happens
+when both sides propose something.
+
+### Fallback modes (`Policy.Mode`)
+
+| Mode | When AI runs |
+|---|---|
+| `AIDisabled` | Never. **This is the default** (`DefaultPolicy()`) — AI is opt-in only, never on by default. |
+| `AIUnknownOnly` | Only for rows where the deterministic result is `SourceUnknown`. An already-classified row, at any confidence, is left alone. |
+| `AIBelowConfidence` | `SourceUnknown` rows, plus any row whose deterministic `Confidence` is below `Policy.ConfidenceThreshold` (default `0.90`, matching `classification.DefaultReviewThreshold`). |
+| `AIForce` | Every non-structural row, regardless of the deterministic result — for comparing AI against the deterministic pipeline. Structural-row safety (below) still applies. |
+
+### Closed-set classification only
+
+The model is never free to invent an account code. Every request carries an
+explicit closed set (`Request.AllowedCodes`, built from
+`financial.AllCodes()` — narrowed to the row's own `StatementType` when
+known, via `ai.BuildAllowedCodes`) plus the literal option to answer
+`"UNKNOWN"` (`ai.CodeUnknown`) if uncertain. `ai.ValidateResponse` checks
+every response — `Response.Code` AND every entry in
+`Response.Alternatives` — against that exact set before anything is
+trusted: a code outside it is rejected outright
+(`IssueInvalidCode`), the row's `UNKNOWN`/deterministic result is preserved
+untouched, and no partial credit is given for "close enough." This is
+enforced identically regardless of which provider adapter is used, since
+`ValidateResponse` runs in the provider-neutral orchestration layer, not
+inside any adapter.
+
+### Structural-row safety
+
+A row whose upstream `financial.RowKind` is `HEADING`, `SUBTOTAL`, or
+`TOTAL` is skipped by AI fallback entirely by default
+(`IssueStructuralRowSkipped`), even under `AIForce` — `Policy.AllowStructuralRows`
+must be explicitly set to true to send a diagnostic request for one. Even
+then, the returned code can **never** cause that row to normalize as an
+ordinary account: `RowKind`/`RowStatus` are always preserved untouched, and
+the AI's answer is recorded on `Provenance` purely for diagnostics, never
+applied to the row's usable `Result`. This mirrors — and is independently
+enforced alongside — `review`'s own [structural-override safety
+rule](#apply-semantics) for classification decisions on structural rows:
+two separate layers, same guarantee, deliberately not merged into one to
+keep AI-fallback safety self-contained.
+
+### Mandatory human review
+
+Every AI-produced classification (`classification.Result` with `Source ==
+classification.SourceAI`) has `ReviewRequired == true` — a hard rule, never
+conditional on model-reported confidence. `review.Build` reads this exactly
+like it reads any deterministic `ReviewRequired`/`Source`, with one small,
+explicit addition: an AI-sourced classification item is always `Required ==
+true` regardless of its `Severity` (which stays `WARNING` for a
+successfully-validated non-`UNKNOWN` AI result, not `BLOCKING` — AI is not
+presumed wrong, only unconfirmed). No second AI-specific review system
+exists; `review` consumes an AI-sourced result through the exact same
+`Build → Plan → Decision → Apply` pipeline as every other classification
+source. See `review.TestBuild_AISourcedClassification_AlwaysRequired` and
+`review.TestIntegration_AIFallback_AcceptedThroughReviewToNormalize` for
+this pinned end to end.
+
+### AI vs. deterministic disagreement
+
+When the deterministic pipeline already proposed a real (non-`UNKNOWN`)
+code and AI proposes a **different** one (only reachable under `AIForce` or
+`AIBelowConfidence` — `AIUnknownOnly` only ever calls AI when the
+deterministic side has nothing to disagree with), neither is silently
+preferred. Both are preserved on `Provenance.Disagreement`
+(`{DeterministicCode, AICode}`), and the row's usable `Result` stays the
+**deterministic** one — AI is never auto-promoted over an existing
+classification. `ai.DescribeDisagreement` renders the pair as the two-line
+display a future review UI can show as-is:
+
+```
+Rule classifier: OPEX_PAYROLL
+AI fallback: COGS_DIRECT_LABOR
+```
+
+### Confidence semantics
+
+`classification.Confidence` (the deterministic pipeline's own heuristic
+scale) and a provider's `Response.RawConfidence` are never mathematically
+combined into a fake unified probability. They remain two separately
+identifiable fields end to end:
+`Provenance.DeterministicResult.Confidence` (the deterministic side, exactly
+as `classification.Result.Confidence` reported it) and
+`Provenance.ModelConfidence` (the provider's own raw, uncalibrated number,
+carried forward under a name that makes that explicit at every call site).
+The one place a `RawConfidence` is reinterpreted onto
+`classification.Confidence`'s scale is `buildAIResult`'s
+`Result.Confidence` field, purely so existing `Confidence`-consuming code
+(`review.Build`'s threshold checks, display sorting) keeps working
+unchanged for an AI-sourced `Result` — the original, uninterpreted number
+always remains separately available on `Provenance.ModelConfidence`.
+
+### Privacy / minimal-context policy
+
+`Request` is the single source of truth for exactly what is sent to a
+provider for one row:
+
+- raw label, normalized label, parent label
+- statement type, row kind (structural rows are normally never sent at
+  all — see above)
+- the closed set of allowed codes (with labels/categories, not raw enum
+  strings)
+- an optional, explicitly caller-supplied `IndustryContext` string
+- an optional, caller-bounded window of nearby rows (`ContextRows`,
+  capped at `Policy.MaxContextRows`, default 4) — label/parent-label only,
+  never amounts
+- a summary of what the deterministic pipeline already concluded
+
+**Never sent:** per-period amounts/values, full uploaded documents, user
+identity, account/customer identity, tax IDs, bank details, or any row
+unrelated to the one being classified. `financial/classification/ai/openai`'s
+own tests
+(`TestClassify_RequestNeverIncludesUnrelatedState`) assert on the literal
+wire payload to keep this guarantee from silently drifting. The OpenAI
+adapter also pins `Store: false` on every request (the provider is not
+asked to retain it for model-distillation/eval products) and never logs
+API keys, full request/response contents, or prompts/responses to any
+persistent store — see the adapter package's own doc comment for the exact
+boundary.
+
+### Provider abstraction and the initial adapter
+
+`ai.Classifier` is a one-request-in/one-response-out interface; nothing in
+`financial/classification/ai` or `review` imports any provider SDK. The
+initial adapter, `financial/classification/ai/openai`, uses the official
+`github.com/openai/openai-go/v2` SDK (Apache-2.0) with Structured Outputs
+(a strict JSON Schema response format) so every response is guaranteed to
+parse into `ai.Response`'s shape rather than requiring free-text scraping.
+Configuration (API key, model, base URL, HTTP client, SDK options) is
+always supplied explicitly via `openai.Config`/`openai.New` — the one
+exception is `openai.NewFromEnv()`, a single named, opt-in convenience
+constructor that reads `OPENAI_API_KEY`/`OPENAI_MODEL`/`OPENAI_BASE_URL`;
+no other code in this repository reads AI-provider environment variables.
+The adapter respects `ctx` cancellation/deadlines directly and performs no
+hidden retries of its own (the SDK's own configurable retry behavior is
+available via `option.WithMaxRetries` in `Config.ClientOptions` if a caller
+wants it — never hardcoded here).
+
+### Batching (`openai.Classifier` as an `ai.BatchClassifier`)
+
+`financial/classification/ai/openai.Classifier` additionally implements
+`ai.BatchClassifier`, so `ai.ClassifyBatchWithFallback` automatically issues
+one structured chat-completion request per batch instead of one per row
+whenever the caller's `Policy` makes more than one row eligible for AI at
+once. **This is an optimization only** — it changes how many provider calls
+are made, never what AI fallback means: the same closed-set contract, the
+same mandatory-review guarantee, and the same
+per-row provenance apply identically whether a row was classified via the
+single-row path or as part of a batch. A caller that never sees
+`Provenance`/`FallbackOutcome` cannot tell which path produced a given
+result.
+
+**Wire shape:** a batch request sends one JSON object with a `rows` array
+(each row carrying the exact same fields `Request` sends for the single-row
+path, plus a request-scoped positional id such as `"row-0"` this adapter
+assigns purely to map a result back to its row — the id never leaves this
+adapter and is not part of `ai.Request`/`ai.Response`) and a single
+`allowed_codes` array (the union of every row's own closed set in this
+batch, deduplicated). The model must return exactly one `results` entry per
+row, each echoing that row's id, inside a strict JSON Schema Structured
+Outputs envelope exactly like the single-row path's schema, just wrapped in
+an array.
+
+**Privacy boundary is unchanged:** each row in a batch request carries only
+the same fields the single-row `Request` sends (label, normalized label,
+parent label, statement type, row kind, allowed codes, bounded context
+rows, deterministic-result summary) — never amounts, full documents, or
+user/account/customer identity, and never any row from outside the batch
+being classified. `openai.TestClassifyBatch_PrivacyBoundary` asserts this at
+the wire level, the same way `TestClassify_RequestNeverIncludesUnrelatedState`
+does for the single-row path.
+
+**Splitting/limits compose, they don't replace each other:**
+`Policy.MaxBatchSize` (row-count cap, enforced in
+`ai.ClassifyBatchWithFallback`/`classifyMany` before this adapter is ever
+called) and `openai.Config.MaxBatchCharacters` (an estimated-size cap —
+marshaled-JSON byte length, not an exact token count — enforced inside
+`ClassifyBatch` itself, defaulting to `openai.DefaultMaxBatchCharacters`)
+both apply: a caller with a generous `MaxBatchSize` but unusually long
+labels/context rows is still protected from an unbounded prompt, because
+this adapter further splits any chunk it receives into deterministic,
+input-order-preserving sub-batches whenever the running character estimate
+would exceed the configured budget. Neither limit ever reorders rows.
+
+**Partial-failure isolation:** if the provider returns a valid batch
+envelope but one row's result is malformed — a duplicate id, an id that
+matches no requested row, a missing id, or (one layer up, via the same
+`ai.ValidateResponse` every path uses) a code outside that row's own closed
+set — only that row is affected: it gets a per-row error (and, once it
+reaches `ai.ClassifyBatchWithFallback`, the appropriate `Issue` and a
+deterministic/`UNKNOWN` result), while every other row in the same batch
+still returns its valid result normally. A whole-envelope failure (transport
+error, non-2xx status, empty/unparseable JSON) is reported for every row in
+that one character-bounded sub-batch only — other sub-batches in the same
+`ClassifyBatch` call are still attempted independently. `Policy.Strict`
+governs this identically to the single-row path: non-`Strict` (the default)
+isolates and continues, `Strict` abandons the remaining batch at the first
+failure — see Failure behavior below, which this adapter changes nothing
+about.
+
+**Single-row compatibility:** `Classify` (the pre-existing one-row method)
+is unchanged — same request/response JSON shape as before, same tests
+(`TestClassify_StructuredResponseParsed` etc.) still pass unmodified. It is
+kept as its own thin path rather than routed through the batch envelope, so
+the already-pinned single-row wire contract never changes shape; the two
+paths share error-wrapping, provider/model/adapter metadata stamping, and
+(one layer up) `ai.ValidateResponse` — the only code that is
+necessarily different is the two schema-building functions themselves,
+since a single object and an array-of-objects envelope are genuinely
+different shapes.
+
+### Failure behavior
+
+AI failure can never make a classification result **worse** than the
+deterministic pipeline already produced. A provider error, timeout, rate
+limit, or invalid/malformed response always leaves the row on its
+deterministic/`UNKNOWN` result plus a structured `Issue` explaining why —
+never a Go `error` return from the orchestration functions themselves,
+matching this repository's `review.Apply`-style "no bare error, everything
+via issues" convention. One row's AI failure never corrupts or blocks any
+other row's result (`ClassifyBatchWithFallback` isolates every row
+independently) unless the caller explicitly opts into `Policy.Strict`,
+which abandons the rest of the batch — with every not-yet-attempted row
+left on its deterministic result plus an explanatory `Issue` — at the FIRST
+AI failure, still without ever returning a Go `error`.
+
+**Error taxonomy** (`ai.IssueCode`): `AI_DISABLED`,
+`AI_PROVIDER_UNAVAILABLE`, `AI_TIMEOUT`, `AI_PROVIDER_ERROR`,
+`AI_INVALID_RESPONSE`, `AI_INVALID_CODE`, `AI_EMPTY_RESPONSE`,
+`AI_RATE_LIMITED`, `AI_CONTEXT_TOO_LARGE`, `AI_BUDGET_EXCEEDED`,
+`AI_STRUCTURAL_ROW_SKIPPED` — a caller never needs to parse a provider error
+string to know what happened; `ai.classifyProviderError` inspects a
+returned error structurally (`errors.Is(err, context.DeadlineExceeded)`,
+and the optional `ai.TimeoutError`/`ai.RateLimitError` interfaces an
+adapter's error may satisfy) to pick the most specific code, and the
+original wrapped error is always preserved on `FallbackOutcome.Err` for
+diagnostics.
+
+### Cost-control options (`Policy`)
+
+`MaxAIRows` (total rows sent to AI across one batch call — once reached,
+every remaining eligible row is left on its deterministic result with
+`IssueBudgetExceeded`, never silently exceeding the configured budget),
+`MaxBatchSize` (chunk size when a `Classifier` also implements the optional
+`BatchClassifier` capability), `MaxContextRows` (per-row context-window
+cap, oversized input is trimmed rather than rejecting the row), and
+`Timeout` (bounds a single provider call when the caller's own `ctx` has no
+tighter deadline already). No pricing/currency estimation is included —
+these are row/request/time budgets only.
+
+The OpenAI adapter adds one adapter-specific guard on top of these:
+`openai.Config.MaxBatchCharacters` bounds the estimated request size (see
+Batching above) of a single underlying provider call, independent of and
+composed with `Policy.MaxBatchSize` — a row-count cap and a size-estimate
+cap that both apply, never one substituting for the other.
+
+### Versioning
+
+Three independently-versioned concerns, per this repository's
+[versioning strategy](#versioning-strategy):
+`ai.RequestSchemaVersion` (the `Request`/`Response` wire shape),
+`ai.OrchestrationVersion` (the trigger/fallback/safety decision logic in
+`ClassifyWithFallback`/`ClassifyBatchWithFallback`), and
+`openai.AdapterVersion` (this specific adapter's prompt-construction/
+response-parsing logic) — each echoed on `Provenance` so a persisted AI
+suggestion can always be traced back to the exact contract that produced
+it, important because a future application layer is expected to persist AI
+suggestions (see [Recommended next phase](#recommended-next-phase)).
+
+### Testing without credentials
+
+Every test in this repository except two runs with zero network access and
+zero credentials: `financial/classification/ai`'s own orchestration tests
+use `ai.FakeClassifier` (a fully in-memory `Classifier`/`BatchClassifier`
+implementation), and `financial/classification/ai/openai`'s tests — including
+its batching-specific suite in `batch_test.go` (multiple valid rows, mixed
+UNKNOWN/valid, an invalid code isolated to one row, duplicate/missing/
+unknown result ids, a whole-envelope provider failure,
+`MaxBatchCharacters`/`MaxBatchSize`/`MaxAIRows` all respected, deterministic
+splitting/ordering) — inject a fake `http.RoundTripper` so even the
+OpenAI-specific request-building/response-parsing logic is exercised
+without touching the network. The two exceptions,
+`openai.TestIntegration_RealProvider` (single-row) and
+`openai.TestIntegration_RealProvider_Batch` (a two-row batch), are opt-in
+only: both `SKIPPED — provider credentials not configured` unless
+`OPENAI_API_KEY` is set in the environment, are kept to the smallest size
+that still exercises their respective path (one row/one call; two rows/one
+batch call) to avoid meaningful API cost, and verify the response(s) parse
+correctly, every returned code is a member of the closed set (or
+`UNKNOWN`), and review-required semantics still hold — neither ever runs as
+part of a normal `go test ./...`, including CI.
+
+### Explicit non-goals for this phase
+
+Not implemented, and not planned as part of this repository's own scope
+(see [What this project intentionally does not contain](#what-this-project-intentionally-does-not-contain)):
+AI OCR correction, AI financial-statement extraction, AI add-back
+recommendations, AI valuation method selection, AI multiple selection, AI
+DCF forecasting, AI report narrative generation, database persistence,
+HTTP endpoints, UI, or external comparable-sales search. Any of these would
+be a separate, later phase — this one is scoped strictly to optional,
+human-reviewed classification fallback.

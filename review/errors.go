@@ -75,6 +75,16 @@ const (
 	// Required == true with an Action this package still permits, but the
 	// combination is otherwise nonsensical for this Kind).
 	IssueIncompatibleDecision IssueCode = "INCOMPATIBLE_DECISION"
+	// IssueStructuralRowOverride means an ACTION_OVERRIDE classification
+	// decision targeted a row whose effective financial.RowKind is
+	// structural (HEADING, SUBTOTAL, or TOTAL) — a classification override
+	// must never assign a financial account code to such a row, since doing
+	// so would silently turn it back into a RowStatusNormal row and cause
+	// double counting during financial.Normalize. The caller must correct
+	// the row's structural role via a KindStructure decision first (which
+	// can change it to RowKindNormal); only then may a classification
+	// override on that same row be applied.
+	IssueStructuralRowOverride IssueCode = "STRUCTURAL_ROW_OVERRIDE"
 )
 
 // Issue is a single Decision validation finding, mirroring adjustments.Issue's

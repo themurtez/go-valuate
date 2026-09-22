@@ -93,6 +93,86 @@ func TestIntegration_IngestionToClassificationToReviewToNormalize(t *testing.T) 
 	}
 }
 
+// TestIntegration_ClassificationOverrideNeverAggregatesStructuralRow is the
+// end-to-end regression for the structural-override safety fix: a subtotal
+// row -> ReviewAllClassifications creates a KindClassification item for it
+// (buildClassificationItems does not skip structural rows) -> a caller
+// attempts an ACTION_OVERRIDE classification decision against it -> Apply
+// -> financial.Normalize must never aggregate that subtotal into any code's
+// total (the exact double-counting failure mode IssueStructuralRowOverride
+// exists to prevent).
+func TestIntegration_ClassificationOverrideNeverAggregatesStructuralRow(t *testing.T) {
+	raws := []financial.RawLineItem{
+		{ID: "row-1", Label: "Product Sales", StatementType: financial.StatementIncomeStatement, Values: map[financial.Period]float64{"2025": 500000}},
+		{ID: "row-2", Label: "Materials", StatementType: financial.StatementIncomeStatement, Values: map[financial.Period]float64{"2025": 180000}},
+		{ID: "row-3", Label: "Gross Profit", StatementType: financial.StatementIncomeStatement, Kind: financial.RowKindSubtotal, Values: map[financial.Period]float64{"2025": 320000}},
+	}
+	cfg := classification.Config{
+		AliasLayers: []classification.AliasLayer{{Name: "global", Aliases: []classification.Alias{
+			{Label: "Product Sales", Code: financial.CodeRevProduct},
+			{Label: "Materials", Code: financial.CodeCogsMaterial},
+		}}},
+		Rules: classification.DefaultRules(),
+	}
+	results := classification.ClassifyBatch(raws, cfg)
+
+	var subtotalResult classification.Result
+	for _, r := range results {
+		if r.RowID == "row-3" {
+			subtotalResult = r
+		}
+	}
+	if subtotalResult.Kind != financial.RowKindSubtotal || subtotalResult.Status != financial.RowStatusSubtotal {
+		t.Fatalf("test setup error: expected row-3 to classify as a structural subtotal, got Kind=%s Status=%s", subtotalResult.Kind, subtotalResult.Status)
+	}
+
+	// ReviewAllClassifications surfaces a KindClassification item even for
+	// the already-correctly-classified structural row — this is the exact
+	// shape the "Known gap" note describes.
+	policy := DefaultPolicy()
+	policy.ReviewAllClassifications = true
+	plan := Build(BuildInput{Classifications: results, Raws: raws}, policy)
+
+	item := mustFindItem(t, plan, KindClassification, "classification:row-3")
+	if item.Classification.Kind != financial.RowKindSubtotal {
+		t.Fatalf("expected the review item to carry forward Kind=subtotal, got %s", item.Classification.Kind)
+	}
+
+	mapped := make([]financial.MappedLineItem, len(results))
+	for i, r := range results {
+		mapped[i] = r.ToMappedLineItem(raws[i])
+	}
+	source := Source{MappedLineItems: mapped}
+
+	// A caller (or reviewer) attempts to force-classify the subtotal row as
+	// an ordinary revenue account.
+	decisions := []Decision{{
+		ItemID: "classification:row-3", Action: ActionOverride,
+		Classification: &ClassificationDecision{Code: financial.CodeRevProduct},
+	}}
+	applyResult := Apply(source, plan, decisions)
+
+	if len(applyResult.Invalid) != 1 || applyResult.Invalid[0].Issues[0].Code != IssueStructuralRowOverride {
+		t.Fatalf("expected the override to be rejected with IssueStructuralRowOverride, got Invalid=%+v Applied=%+v", applyResult.Invalid, applyResult.Applied)
+	}
+
+	dataset, err := financial.Normalize(applyResult.MappedLineItems, financial.NormalizeOptions{Currency: "USD"})
+	if err != nil {
+		t.Fatalf("expected Normalize to succeed, got error: %v", err)
+	}
+
+	for _, it := range dataset.Items {
+		if it.Code == financial.CodeRevProduct && it.Period == "2025" {
+			// Only row-1's 500000 may contribute; row-3's 320000 must never
+			// have been folded in, whether alone (500000) or doubled with
+			// row-3 (820000).
+			if it.Amount != 500000 {
+				t.Fatalf("subtotal row was aggregated into REV_PRODUCT: expected 500000 (row-1 only), got %v", it.Amount)
+			}
+		}
+	}
+}
+
 // TestIntegration_ScannedPDFToOCRToReviewToDecisionToCorrectedData exercises
 // the OCR-specific chain section 20 asks for: an ambiguous/low-confidence
 // OCR numeric cell -> review item -> explicit decision -> corrected data.

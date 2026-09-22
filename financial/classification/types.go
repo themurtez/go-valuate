@@ -43,6 +43,19 @@ const (
 	// subtotal or total row) rather than an ordinary account, based on its
 	// label and/or existing metadata.
 	SourceStructural Source = "structural"
+	// SourceAI means an optional AI fallback classifier (see
+	// financial/classification/ai) proposed this mapping after the
+	// deterministic stages above it (explicit/alias/context rule/phrase
+	// rule) could not produce an acceptable result. A SourceAI Result is
+	// never produced by Classify/ClassifyBatch themselves — this package
+	// has no AI/LLM dependency of its own (see the package doc comment) —
+	// it exists here purely so a Result carrying it slots into the exact
+	// same precedence/display/ReviewRequired handling as every
+	// deterministic source, with nothing downstream needing a separate
+	// code path. A SourceAI Result always has ReviewRequired == true
+	// regardless of any model-reported confidence — see
+	// ai.Provenance.ReviewRequired's identical hard rule.
+	SourceAI Source = "ai"
 	// SourceUnknown means no stage of the pipeline could justify a mapping.
 	SourceUnknown Source = "unknown"
 )

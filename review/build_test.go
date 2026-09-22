@@ -71,6 +71,32 @@ func TestBuild_LowConfidenceClassification_ProducesWarningItem(t *testing.T) {
 	}
 }
 
+// TestBuild_AISourcedClassification_AlwaysRequired proves a
+// classification.SourceAI result is always Required == true regardless of
+// its Severity (which stays WARNING for a non-UNKNOWN AI result, not
+// BLOCKING) — financial/classification/ai's mandatory-human-review product
+// rule, consumed here via the existing Source field rather than a second
+// AI-specific review system.
+func TestBuild_AISourcedClassification_AlwaysRequired(t *testing.T) {
+	in := BuildInput{
+		Classifications: []classification.Result{
+			{
+				RowID: "row-ai-1", Label: "Field Labor", Code: financial.CodeCogsDirectLabor,
+				Confidence: 0.82, Source: classification.SourceAI, ReviewRequired: true,
+			},
+		},
+		Raws: []financial.RawLineItem{{ID: "row-ai-1", Label: "Field Labor"}},
+	}
+	plan := Build(in, DefaultPolicy())
+	item := mustFindItem(t, plan, KindClassification, "classification:row-ai-1")
+	if item.Severity != SeverityWarning {
+		t.Errorf("expected SeverityWarning for a non-UNKNOWN AI result, got %s", item.Severity)
+	}
+	if !item.Required {
+		t.Error("expected an AI-sourced classification item to always be Required, regardless of Severity")
+	}
+}
+
 // TestBuild_ClassificationWithAlternatives_MateriallyClose proves a
 // materially-close alternative triggers review even above threshold.
 func TestBuild_ClassificationWithAlternatives_MateriallyClose(t *testing.T) {

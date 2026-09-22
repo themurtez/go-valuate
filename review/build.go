@@ -304,12 +304,24 @@ func buildClassificationItems(in BuildInput, policy Policy) []ReviewItem {
 			alts = append(alts, ClassificationAlternative{Code: c.Code, Confidence: float64(c.Confidence), Reason: c.Reason})
 		}
 
+		// An AI-fallback-sourced result (classification.SourceAI) is always
+		// Required regardless of Severity, per financial/classification/ai's
+		// hard "mandatory human review" product rule (see
+		// ai.Provenance.ReviewRequired's identical doc comment) — Severity
+		// stays WARNING (AI is not necessarily wrong, unlike UNKNOWN), but
+		// the item must still be explicitly resolved before the affected
+		// data is trusted, exactly like a BLOCKING/ERROR item. This is
+		// "consuming the result normally" (reading the existing Source
+		// field Build already threads through), not a second AI-specific
+		// review system.
+		required := severity == SeverityBlocking || severity == SeverityError || res.Source == classification.SourceAI
+
 		title := fmt.Sprintf("Classification review: %s", displayLabel(res.Label, raw.Label))
 		items = append(items, ReviewItem{
 			ID:            buildClassificationID(res.RowID),
 			Kind:          KindClassification,
 			Severity:      severity,
-			Required:      severity == SeverityBlocking || severity == SeverityError,
+			Required:      required,
 			Title:         title,
 			Reason:        reason,
 			SourceRowID:   res.RowID,
