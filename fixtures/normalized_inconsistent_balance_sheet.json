@@ -1,0 +1,70 @@
+{
+  "currency": "USD",
+  "items": [
+    {
+      "code": "REV_PRODUCT",
+      "period": "2025",
+      "amount": 500000
+    },
+    {
+      "code": "COGS_MATERIAL",
+      "period": "2025",
+      "amount": 200000
+    },
+    {
+      "code": "OPEX_PAYROLL",
+      "period": "2025",
+      "amount": 120000
+    },
+    {
+      "code": "OPEX_RENT",
+      "period": "2025",
+      "amount": 24000
+    },
+    {
+      "code": "DEPRECIATION",
+      "period": "2025",
+      "amount": 10000
+    },
+    {
+      "code": "BS_CASH",
+      "period": "2025",
+      "amount": 100000
+    },
+    {
+      "code": "BS_ACCOUNTS_RECEIVABLE",
+      "period": "2025",
+      "amount": 80000
+    },
+    {
+      "code": "BS_INVENTORY",
+      "period": "2025",
+      "amount": 60000
+    },
+    {
+      "code": "BS_FIXED_ASSETS",
+      "period": "2025",
+      "amount": 60000
+    },
+    {
+      "code": "BS_ACCOUNTS_PAYABLE",
+      "period": "2025",
+      "amount": 50000
+    },
+    {
+      "code": "BS_SHORT_TERM_DEBT",
+      "period": "2025",
+      "amount": 40000
+    },
+    {
+      "code": "BS_LONG_TERM_DEBT",
+      "period": "2025",
+      "amount": 100000
+    },
+    {
+      "code": "BS_OWNER_EQUITY",
+      "period": "2025",
+      "amount": 60000
+    }
+  ]
+}

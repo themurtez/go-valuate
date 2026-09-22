@@ -1,0 +1,410 @@
+{
+  "currency": "USD",
+  "items": [
+    {
+      "code": "REV_PRODUCT",
+      "period": "2023",
+      "amount": 4200000
+    },
+    {
+      "code": "COGS_MATERIAL",
+      "period": "2023",
+      "amount": 1680000
+    },
+    {
+      "code": "COGS_DIRECT_LABOR",
+      "period": "2023",
+      "amount": 980000
+    },
+    {
+      "code": "COGS_FREIGHT",
+      "period": "2023",
+      "amount": 115000
+    },
+    {
+      "code": "COGS_OTHER",
+      "period": "2023",
+      "amount": 62000
+    },
+    {
+      "code": "OPEX_PAYROLL",
+      "period": "2023",
+      "amount": 320000
+    },
+    {
+      "code": "OPEX_RENT",
+      "period": "2023",
+      "amount": 96000
+    },
+    {
+      "code": "OPEX_INSURANCE",
+      "period": "2023",
+      "amount": 38000
+    },
+    {
+      "code": "OPEX_UTILITIES",
+      "period": "2023",
+      "amount": 54000
+    },
+    {
+      "code": "OPEX_REPAIRS",
+      "period": "2023",
+      "amount": 41000
+    },
+    {
+      "code": "OPEX_PROFESSIONAL_FEES",
+      "period": "2023",
+      "amount": 28000
+    },
+    {
+      "code": "OPEX_OTHER",
+      "period": "2023",
+      "amount": 12000
+    },
+    {
+      "code": "DEPRECIATION",
+      "period": "2023",
+      "amount": 165000
+    },
+    {
+      "code": "INTEREST_EXPENSE",
+      "period": "2023",
+      "amount": 58000
+    },
+    {
+      "code": "INCOME_TAX",
+      "period": "2023",
+      "amount": 95000
+    },
+    {
+      "code": "BS_CASH",
+      "period": "2023",
+      "amount": 180000
+    },
+    {
+      "code": "BS_ACCOUNTS_RECEIVABLE",
+      "period": "2023",
+      "amount": 620000
+    },
+    {
+      "code": "BS_INVENTORY",
+      "period": "2023",
+      "amount": 890000
+    },
+    {
+      "code": "BS_PREPAID",
+      "period": "2023",
+      "amount": 22000
+    },
+    {
+      "code": "BS_FIXED_ASSETS",
+      "period": "2023",
+      "amount": 2400000
+    },
+    {
+      "code": "BS_ACCUM_DEPRECIATION",
+      "period": "2023",
+      "amount": 780000
+    },
+    {
+      "code": "BS_ACCOUNTS_PAYABLE",
+      "period": "2023",
+      "amount": 410000
+    },
+    {
+      "code": "BS_CURRENT_LIABILITY_OTHER",
+      "period": "2023",
+      "amount": 65000
+    },
+    {
+      "code": "BS_SHORT_TERM_DEBT",
+      "period": "2023",
+      "amount": 150000
+    },
+    {
+      "code": "BS_LONG_TERM_DEBT",
+      "period": "2023",
+      "amount": 980000
+    },
+    {
+      "code": "BS_RETAINED_EARNINGS",
+      "period": "2023",
+      "amount": 1200000
+    },
+    {
+      "code": "BS_OWNER_EQUITY",
+      "period": "2023",
+      "amount": 527000
+    },
+    {
+      "code": "REV_PRODUCT",
+      "period": "2024",
+      "amount": 4450000
+    },
+    {
+      "code": "COGS_MATERIAL",
+      "period": "2024",
+      "amount": 1760000
+    },
+    {
+      "code": "COGS_DIRECT_LABOR",
+      "period": "2024",
+      "amount": 1020000
+    },
+    {
+      "code": "COGS_FREIGHT",
+      "period": "2024",
+      "amount": 122000
+    },
+    {
+      "code": "COGS_OTHER",
+      "period": "2024",
+      "amount": 66000
+    },
+    {
+      "code": "OPEX_PAYROLL",
+      "period": "2024",
+      "amount": 338000
+    },
+    {
+      "code": "OPEX_RENT",
+      "period": "2024",
+      "amount": 96000
+    },
+    {
+      "code": "OPEX_INSURANCE",
+      "period": "2024",
+      "amount": 40000
+    },
+    {
+      "code": "OPEX_UTILITIES",
+      "period": "2024",
+      "amount": 56500
+    },
+    {
+      "code": "OPEX_REPAIRS",
+      "period": "2024",
+      "amount": 44000
+    },
+    {
+      "code": "OPEX_PROFESSIONAL_FEES",
+      "period": "2024",
+      "amount": 29500
+    },
+    {
+      "code": "OPEX_OTHER",
+      "period": "2024",
+      "amount": 12800
+    },
+    {
+      "code": "DEPRECIATION",
+      "period": "2024",
+      "amount": 172000
+    },
+    {
+      "code": "INTEREST_EXPENSE",
+      "period": "2024",
+      "amount": 54000
+    },
+    {
+      "code": "INCOME_TAX",
+      "period": "2024",
+      "amount": 102000
+    },
+    {
+      "code": "BS_CASH",
+      "period": "2024",
+      "amount": 205000
+    },
+    {
+      "code": "BS_ACCOUNTS_RECEIVABLE",
+      "period": "2024",
+      "amount": 655000
+    },
+    {
+      "code": "BS_INVENTORY",
+      "period": "2024",
+      "amount": 935000
+    },
+    {
+      "code": "BS_PREPAID",
+      "period": "2024",
+      "amount": 23500
+    },
+    {
+      "code": "BS_FIXED_ASSETS",
+      "period": "2024",
+      "amount": 2550000
+    },
+    {
+      "code": "BS_ACCUM_DEPRECIATION",
+      "period": "2024",
+      "amount": 940000
+    },
+    {
+      "code": "BS_ACCOUNTS_PAYABLE",
+      "period": "2024",
+      "amount": 432000
+    },
+    {
+      "code": "BS_CURRENT_LIABILITY_OTHER",
+      "period": "2024",
+      "amount": 68000
+    },
+    {
+      "code": "BS_SHORT_TERM_DEBT",
+      "period": "2024",
+      "amount": 145000
+    },
+    {
+      "code": "BS_LONG_TERM_DEBT",
+      "period": "2024",
+      "amount": 905000
+    },
+    {
+      "code": "BS_RETAINED_EARNINGS",
+      "period": "2024",
+      "amount": 1355000
+    },
+    {
+      "code": "BS_OWNER_EQUITY",
+      "period": "2024",
+      "amount": 523500
+    },
+    {
+      "code": "REV_PRODUCT",
+      "period": "2025",
+      "amount": 4710000
+    },
+    {
+      "code": "COGS_MATERIAL",
+      "period": "2025",
+      "amount": 1845000
+    },
+    {
+      "code": "COGS_DIRECT_LABOR",
+      "period": "2025",
+      "amount": 1065000
+    },
+    {
+      "code": "COGS_FREIGHT",
+      "period": "2025",
+      "amount": 129000
+    },
+    {
+      "code": "COGS_OTHER",
+      "period": "2025",
+      "amount": 70000
+    },
+    {
+      "code": "OPEX_PAYROLL",
+      "period": "2025",
+      "amount": 356000
+    },
+    {
+      "code": "OPEX_RENT",
+      "period": "2025",
+      "amount": 99000
+    },
+    {
+      "code": "OPEX_INSURANCE",
+      "period": "2025",
+      "amount": 42000
+    },
+    {
+      "code": "OPEX_UTILITIES",
+      "period": "2025",
+      "amount": 58800
+    },
+    {
+      "code": "OPEX_REPAIRS",
+      "period": "2025",
+      "amount": 46500
+    },
+    {
+      "code": "OPEX_PROFESSIONAL_FEES",
+      "period": "2025",
+      "amount": 31000
+    },
+    {
+      "code": "OPEX_OTHER",
+      "period": "2025",
+      "amount": 13500
+    },
+    {
+      "code": "DEPRECIATION",
+      "period": "2025",
+      "amount": 180000
+    },
+    {
+      "code": "INTEREST_EXPENSE",
+      "period": "2025",
+      "amount": 49000
+    },
+    {
+      "code": "INCOME_TAX",
+      "period": "2025",
+      "amount": 111000
+    },
+    {
+      "code": "BS_CASH",
+      "period": "2025",
+      "amount": 238000
+    },
+    {
+      "code": "BS_ACCOUNTS_RECEIVABLE",
+      "period": "2025",
+      "amount": 690000
+    },
+    {
+      "code": "BS_INVENTORY",
+      "period": "2025",
+      "amount": 985000
+    },
+    {
+      "code": "BS_PREPAID",
+      "period": "2025",
+      "amount": 24800
+    },
+    {
+      "code": "BS_FIXED_ASSETS",
+      "period": "2025",
+      "amount": 2700000
+    },
+    {
+      "code": "BS_ACCUM_DEPRECIATION",
+      "period": "2025",
+      "amount": 1105000
+    },
+    {
+      "code": "BS_ACCOUNTS_PAYABLE",
+      "period": "2025",
+      "amount": 455000
+    },
+    {
+      "code": "BS_CURRENT_LIABILITY_OTHER",
+      "period": "2025",
+      "amount": 71000
+    },
+    {
+      "code": "BS_SHORT_TERM_DEBT",
+      "period": "2025",
+      "amount": 140000
+    },
+    {
+      "code": "BS_LONG_TERM_DEBT",
+      "period": "2025",
+      "amount": 825000
+    },
+    {
+      "code": "BS_RETAINED_EARNINGS",
+      "period": "2025",
+      "amount": 1522000
+    },
+    {
+      "code": "BS_OWNER_EQUITY",
+      "period": "2025",
+      "amount": 519800
+    }
+  ]
+}
