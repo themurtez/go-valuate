@@ -262,6 +262,7 @@ go-valuate/
   analytics/cashflow/        EBITDA-to-free-cash-flow bridge, conversion ratios, coverage, burn/runway
   analytics/revenuequality/  revenue composition, growth/volatility, customer retention, concentration
   analytics/concentration/   customer/vendor concentration risk: shares, HHI, dependency changes, loss scenarios
+  analytics/anomalies/       expense anomaly / margin-leakage detection: deterministic spike/variance/pattern rules
   valuation/                 common valuation result envelope (value types, bridge, issues)
   valuation/sde/              SDE multiple method
   valuation/ebitda/           EBITDA multiple method
@@ -2959,6 +2960,151 @@ changes, zero/negative/malformed observations, top-N-loss scenarios with
 default and per-entity margin assumptions, category breakdown, missing
 `PeriodMeta`, and JSON/determinism) exercised against hand-built fixtures.
 
+### `analytics/anomalies`
+
+A deterministic **expense anomaly / margin-leakage analysis**: explainable
+spikes, unusual variances, and structural pattern changes across a
+normalized `financial.FinancialDataset`'s accounts and periods. No AI/ML,
+and no rule here ever calls a finding fraud — every `Anomaly` uses neutral
+language ("anomaly," "variance," "unusual pattern," "review recommended")
+and is the output of one fixed, documented, `Thresholds`-driven rule, never
+a model score or an accusation.
+
+Unlike `analytics/concentration` (which is dataset-independent), this
+package reads `Input.Dataset` directly — its task explicitly calls for
+"normalized financial dataset" input, and every rule (expense-outpacing-
+revenue, margin deterioration, owner/discretionary share) needs the
+taxonomy's revenue/COGS/OPEX category structure, matching
+`analytics/qoe`/`workingcapital`/`revenuequality`'s dataset-bound
+convention instead.
+
+Every function is pure — no I/O, no mutation of caller-owned input — and
+`Calculate` returns byte-for-byte identical JSON across repeated runs
+against identical input, regardless of Go's randomized map iteration order.
+
+```go
+res := anomalies.Calculate(anomalies.Input{
+    Dataset: dataset, // financial.FinancialDataset
+    PeriodMeta: map[financial.Period]anomalies.PeriodInfo{
+        "2024": {Type: anomalies.PeriodTypeFiscalYear, FiscalYear: 2024},
+        "2025": {Type: anomalies.PeriodTypeFiscalYear, FiscalYear: 2025},
+    },
+    AccountGroups: []anomalies.AccountGroup{
+        {Name: "Marketing & Advertising", Codes: []financial.Code{financial.CodeOpexMarketing}},
+    },
+}, anomalies.Options{})
+
+for _, a := range res.Anomalies {
+    fmt.Println(a.Code, a.Account, a.Period, a.Explanation)
+}
+fmt.Println(res.Summary.Total, res.Summary.ReviewRecommended)
+```
+
+#### Detection rules
+
+Eleven deterministic `RuleCode`s, each documented with its exact comparison
+method on the constant itself:
+
+| `RuleCode` | What it detects |
+|---|---|
+| `ABSOLUTE_AMOUNT_SPIKE` | One account's unsigned period-over-prior-period dollar change at or above `Thresholds.AbsoluteAmountSpike` |
+| `PERCENTAGE_CHANGE_SPIKE` | The same comparison as a `\|change\| / \|prior\|` ratio at or above `Thresholds.PercentageChangeSpike` (requires a nonzero baseline) |
+| `EXPENSE_OUTPACING_REVENUE` | A COGS/OPEX account's growth rate exceeding Total Revenue's growth rate, over the same adjacent period pair, by at least `Thresholds.ExpenseOutpacingRevenueGap` raw points |
+| `MARGIN_DETERIORATION` | Gross margin or operating margin declining by at least `Thresholds.MarginDeteriorationPoints` raw points, period over prior period (checked independently; `Account` is empty and `MetricLabel` is set, since this is a synthetic figure) |
+| `NEW_MATERIAL_EXPENSE_CATEGORY` | An expense account absent in the prior period reporting a materially large amount in the current one — the two-leg `NewCategoryMaterialAmount`/`NewCategoryMaterialPercentOfRevenue` test, same OR logic as `review.IsMaterial` |
+| `ACCOUNT_DISAPPEARED_REAPPEARED` | Any account (income-statement or balance-sheet) transitioning from "has a `NormalizedItem`" to "no `NormalizedItem` at all," or reappearing after a gap. An explicitly reported `$0` is a real, present value here — never treated as absent |
+| `REPEATED_UNUSUAL_VALUE` | The same account reporting the identical nonzero amount in at least `Thresholds.RepeatedValueMinOccurrences` distinct periods — a copy-paste/stale-value signal |
+| `SIGN_FLIP` | An account's sign reversing between adjacent periods, with both magnitudes at least `Thresholds.SignFlipMinMagnitude` |
+| `DUPLICATE_LIKE_AMOUNTS` | The identical amount recurring across two or more **distinct** COGS/OPEX accounts (a value repeating on a single account is `REPEATED_UNUSUAL_VALUE`'s concern, not this rule's) |
+| `HIGH_OWNER_DISCRETIONARY_SHARE` | `financial.CodeOpexOwnerComp` plus `Input.DiscretionaryCodes`, as a fraction of the most recent period's Total Revenue, at or above `Thresholds.OwnerDiscretionaryShareOfRevenue` |
+| `UNEXPECTED_NEGATIVE_AMOUNT` | A revenue or expense account reporting a negative amount at least `Thresholds.UnexpectedNegativeMinMagnitude` in magnitude — this repository's sign convention treats both as conventionally non-negative |
+
+`REPEATED_UNUSUAL_VALUE`, `DUPLICATE_LIKE_AMOUNTS`, and
+`UNEXPECTED_NEGATIVE_AMOUNT` need no `Input.PeriodMeta` (order-independent);
+every other rule requires it and is skipped — with an advisory
+`NO_PERIOD_META`/`PERIOD_MISSING_FROM_META` warning — when chronological
+order is unavailable, mirroring every `analytics/` sibling's identical
+all-or-nothing period-ordering rule.
+
+#### Account groups and the discretionary-expense pool
+
+`Input.AccountGroups` optionally labels `Anomaly.Group` for display/
+filtering — it never changes which anomalies are detected, only how they
+can be labeled afterward, and a code listed in more than one group is
+labeled by whichever group appears first (deterministic, caller-controlled
+precedence, never Go map order).
+
+`HIGH_OWNER_DISCRETIONARY_SHARE` always includes
+`financial.CodeOpexOwnerComp` (the one taxonomy code unambiguously
+owner-related) and lets the caller extend the pool via
+`Input.DiscretionaryCodes` — e.g. a caller whose classification pipeline
+routes personal vehicle/travel expenses onto `CodeOpexVehicle`/
+`CodeOpexTravel` supplies those here. This mirrors
+`workingcapital.InclusionPolicy`'s "one unambiguous default plus explicit
+caller extension" pattern, since the taxonomy has no broader "discretionary"
+grouping the way `financial/adjustments.Type` does for confirmed
+adjustments (not applicable here — this package runs on the raw dataset,
+before any adjustment has been proposed or confirmed).
+
+#### Float equality and the duplicate/repeated-value rules
+
+`REPEATED_UNUSUAL_VALUE` and `DUPLICATE_LIKE_AMOUNTS` both need to decide
+"are these two amounts the same value" — a structural equality check, not a
+materiality judgment, so it is **not** one of the caller-adjustable
+`Thresholds` fields. Amounts are considered equal when they round to the
+same value at cents precision (`FloatEqualityTolerance = 0.01`), which
+absorbs floating-point noise from upstream ingestion/normalization
+arithmetic without ever conflating two amounts a caller would consider
+genuinely distinct dollar figures.
+
+#### What `Result` contains
+
+| Field | What it is |
+|---|---|
+| `Anomalies` | Every anomaly found, ordered by `Period`, then `RuleCode` declaration order, then `Account` — see [Deterministic ordering guarantees](#deterministic-ordering-guarantees). |
+| `Summary` | `Total`, `ByRule`/`BySeverity` rollups, and `ReviewRecommended` (`true` when `Total > 0`) — a deterministic rollup so a caller doesn't have to re-scan `Anomalies` itself. |
+| `Thresholds` | The resolved `Options.Thresholds` (after `DefaultThresholds` substitution) this `Result` was computed under, so a persisted `Result` remains self-describing. |
+| `Warnings` / `Errors` | Structured `Issue`s (own `IssueCode` system — see [Error taxonomy](#error-taxonomy)) for input-level problems (`NO_PERIODS`, `NO_PERIOD_META`, `PERIOD_MISSING_FROM_META`). |
+
+Every `Anomaly` carries `Code`, `Severity`, `Account` (or `MetricLabel` for
+a synthetic-metric finding), `Group`, `Period`/`BaselinePeriod`,
+`Baseline`/`Observed` (each an `AnomalyValue` distinguishing "computed/
+reported to be exactly `$0`" from "cannot be computed"), `Delta`,
+`Threshold`, a pre-filled `Explanation` (display only, never parsed), and
+`Provenance` (verbatim `financial.SourceRef`s from `Input.Dataset`, when
+present) — every field the task's output contract requires.
+
+#### Exported surface, by file
+
+- **`types.go`** — `Input`, `Options`, `Result`, `PeriodInfo`/`PeriodType`,
+  `AccountGroup`, `AnomalyValue`/`Unavailable`/`AvailableValue`, `RuleCode`,
+  `AnomalySeverity`, `Anomaly`, `Provenance`, `Thresholds`/`DefaultThresholds()`,
+  `IssueCode`/`IssueSeverity`/`Issue`, `HasErrors`, `Summary`, `RuleCount`,
+  `SeverityCount`, `FloatEqualityTolerance`, `FormulaVersion`.
+- **`anomalies.go`** — `Calculate(Input, Options) Result`: wires every rule
+  together, plus the shared `codeIndex`/period-ordering/sorting/summary
+  helpers every rule file uses.
+- **`accounts.go`** — revenue/COGS/OPEX code sets (derived from
+  `financial.CodesByCategory`) and the gross-margin/operating-margin
+  helpers.
+- **`spikes.go`** — `ABSOLUTE_AMOUNT_SPIKE`, `PERCENTAGE_CHANGE_SPIKE`,
+  `SIGN_FLIP`, `UNEXPECTED_NEGATIVE_AMOUNT`.
+- **`growth.go`** — `EXPENSE_OUTPACING_REVENUE`, `MARGIN_DETERIORATION`.
+- **`categories.go`** — `NEW_MATERIAL_EXPENSE_CATEGORY`,
+  `ACCOUNT_DISAPPEARED_REAPPEARED`.
+- **`discretionary.go`** — `HIGH_OWNER_DISCRETIONARY_SHARE`.
+- **`duplicates.go`** — `REPEATED_UNUSUAL_VALUE`, `DUPLICATE_LIKE_AMOUNTS`.
+
+See [`analytics/anomalies/anomalies_test.go`](analytics/anomalies/anomalies_test.go),
+[`analytics/anomalies/determinism_test.go`](analytics/anomalies/determinism_test.go),
+and [`analytics/anomalies/roundtrip_test.go`](analytics/anomalies/roundtrip_test.go)
+for every scenario the task requires (stable dataset, spikes, revenue-linked
+expense growth, margin leak, sign flips, small immaterial changes, missing
+periods including both the disappeared and reappeared-after-a-gap branches,
+repeated values, duplicate-like cross-account amounts, owner/discretionary
+share, unexpected negative amounts, account grouping, custom thresholds,
+and JSON/determinism) exercised against hand-built fixtures.
+
 ### `valuation`
 
 Implements the individual valuation methods themselves: SDE multiple,
@@ -4131,6 +4277,7 @@ persist historical valuations").
 | Cash-flow analysis formulas | `cashflow.FormulaVersion`, echoed on `cashflow.Result.FormulaVersion` | The EBITDA-to-free-cash-flow bridge, every conversion ratio, the `RecurringDrains`/`CashRunway` formulas, the `DefaultThresholds` flag-trigger rules, and the EBITDA-based estimate method used under `Options.AllowEBITDAEstimate` (`analytics/cashflow`) |
 | Revenue-quality analysis formulas | `revenuequality.FormulaVersion`, echoed on `revenuequality.Result.FormulaVersion` | The recurring/non-recurring revenue split, the `Statistics`/`Trend`/`CAGRResult`/`VolatilityResult` formulas, the customer-transition (new/lost/retained/expansion/contraction) formulas, the `ConcentrationSummary`/HHI formula, and the `DefaultThresholds` flag-trigger rules (`analytics/revenuequality`) |
 | Concentration analysis formulas | `concentration.FormulaVersion`, echoed on `concentration.Result.FormulaVersion` | The top-N-share/HHI formulas, the entity-ranking and `DependencyChange` methodology, the lost-entity/top-N-loss `Scenario` formulas (including the optional earnings-impact conversion), and the `DefaultThresholds` flag-trigger rules (`analytics/concentration`) |
+| Anomaly detection rules | `anomalies.FormulaVersion`, echoed on `anomalies.Result.FormulaVersion` | Every `RuleCode`'s exact comparison method (spike/variance/growth-gap/margin/materiality/gap/duplicate/sign/negative-amount detection) and the `DefaultThresholds` trigger points (`analytics/anomalies`) |
 | AI request/response schema | `ai.RequestSchemaVersion`, echoed on `ai.Provenance.RequestSchemaVersion` | The `Request`/`Response` wire shape `financial/classification/ai` sends to/expects from a `Classifier` |
 | AI fallback orchestration | `ai.OrchestrationVersion`, echoed on `ai.Provenance.OrchestrationVersion` | The trigger/fallback/safety decision logic in `ClassifyWithFallback`/`ClassifyBatchWithFallback` (which `FallbackMode` runs AI when, structural-row skipping, disagreement handling) |
 | OpenAI adapter (classification) | `openai.AdapterVersion`, echoed on `ai.Provenance.AdapterVersion` | This specific provider adapter's prompt-construction/response-parsing logic (`financial/classification/ai/openai`) |
@@ -4190,6 +4337,9 @@ unverified incidental property of the standard library).
 | `revenuequality.ConcentrationSummary.TopNShares` | Ascending by `N`, deduplicated (`Policy.ConcentrationTopN`) |
 | `revenuequality.ConcentrationSummary.Segments` | Sorted by `Segment` string ascending |
 | `revenuequality.Result.Flags` | `FlagCode` declaration order (`DECLINING_RECURRING_MIX` through `SHRINKING_EXISTING_CUSTOMER_BASE`), then by `Period` within a code |
+| `anomalies.Result.Anomalies` | By `Period` (chronologically when `Input.PeriodMeta` covers every period, else `financial.FinancialDataset.Periods()`'s lexical order), then by `RuleCode` declaration order, then by `Account` string — a real `sort.SliceStable` (`anomalies`'s `sortAnomalies`), never left to `Calculate`'s internal per-rule append order |
+| `anomalies.Summary.ByRule` / `BySeverity` | `RuleCode` declaration order / fixed `info`, `warning`, `critical` order — never Go map order (`analytics/anomalies`'s `buildSummary`) |
+| `anomalies.Anomaly.RelatedPeriods` (on `REPEATED_UNUSUAL_VALUE`/`DUPLICATE_LIKE_AMOUNTS` anomalies) | Sorted by `Period` string ascending |
 
 ## Error taxonomy
 
@@ -4295,6 +4445,18 @@ message strings:
   (`DECLINING_RECURRING_MIX`, `GROWTH_DEPENDENT_ON_NEW_CUSTOMERS`, etc.),
   mirroring `qoe.FlagCode`/`ratios.SignalCode`/`cashflow.FlagCode`'s
   identical input-problem/quality-signal split.
+- **`anomalies.Issue{Code anomalies.IssueCode, Severity, Message}`** —
+  `analytics/anomalies`'s own separate system (`NO_PERIODS`,
+  `NO_PERIOD_META`, `PERIOD_MISSING_FROM_META`), for the same reason as
+  every other `analytics/` sibling above: an input-level
+  anomaly-detection problem is its own problem domain, distinct from its
+  siblings despite the identical `Available`/`Warnings`/`Errors` shape.
+  `anomalies` also defines its own separate `RuleCode` vocabulary
+  (`ABSOLUTE_AMOUNT_SPIKE`, `MARGIN_DETERIORATION`, etc.) and
+  `AnomalySeverity` (kept distinct from `IssueSeverity` — see
+  `AnomalySeverity`'s own doc comment), mirroring
+  `qoe.FlagCode`/`ratios.SignalCode`/`cashflow.FlagCode`/
+  `revenuequality.FlagCode`'s identical input-problem/quality-signal split.
 - **`ai.Issue{RowID, Code ai.IssueCode, Severity, Message}`** —
   `financial/classification/ai`'s own separate system (`AI_DISABLED`,
   `AI_PROVIDER_UNAVAILABLE`, `AI_TIMEOUT`, `AI_PROVIDER_ERROR`,
