@@ -258,6 +258,7 @@ go-valuate/
   financial/earnings/        maintainable-earnings selection across historical periods
   analytics/qoe/             quality-of-earnings analysis: adjustment burden, recurrence, flags, score
   analytics/workingcapital/  operating working-capital history, statistics, seasonality, and peg analysis
+  analytics/ratios/          financial-ratio suite: profitability/liquidity/leverage/efficiency/growth, trends, signals
   valuation/                 common valuation result envelope (value types, bridge, issues)
   valuation/sde/              SDE multiple method
   valuation/ebitda/           EBITDA multiple method
@@ -2334,6 +2335,178 @@ revenue, quarterly-vs-annual comparability, every peg method's excess/
 deficit comparison, and JSON/determinism) exercised against both the
 repository's realistic multi-year fixtures and hand-built minimal datasets.
 
+### `analytics/ratios`
+
+A deterministic **financial-ratio suite** — profitability, liquidity,
+leverage, efficiency, and growth ratios — computed from a normalized
+`financial.FinancialDataset`, plus period-over-period trend/comparison
+output and caller-configurable, rule-based health signals.
+
+Like `analytics/qoe` and `analytics/workingcapital`, this package
+recomputes whatever `financial/metrics.Snapshot` figures it needs directly
+from `Input.Dataset` rather than requiring a caller to separately run
+`financial/metrics` first. Every ratio is an **ending-balance** calculation
+for its period — this package never averages a balance-sheet figure across
+two periods, consistent with every other formula in this repository
+(`financial/metrics.debtMetrics`/`workingCapital`,
+`workingcapital.PeriodNWC`). Every function is pure — no I/O, no mutation
+of caller-owned input — and `Calculate` returns byte-for-byte identical
+JSON across repeated runs against identical input.
+
+```go
+res := ratios.Calculate(ratios.Input{
+    Dataset:    dataset,    // financial.FinancialDataset
+    PeriodMeta: periodMeta, // map[financial.Period]ratios.PeriodInfo
+}, ratios.Options{})
+
+latest := res.History[len(res.History)-1]
+fmt.Println(latest.CurrentRatio.Value.Value, latest.DebtToEBITDA.Value.Value, res.Signals)
+```
+
+#### Total Assets and Total Equity
+
+This repository's taxonomy has no single "Total Assets" or "Total Equity"
+`financial.Code` (see `financial/taxonomy.go`), and no package anywhere in
+this repository assumes the balance-sheet identity Assets = Liabilities +
+Equity holds for a given dataset. `analytics/ratios` derives both figures
+directly as a **sum of existing taxonomy codes** (`components.go`), the
+same approach `analytics/workingcapital` already uses for its own
+operating-current-asset/liability sums, rather than deriving one side as a
+plug from the other (which would silently mask a source statement that
+does not actually balance):
+
+```
+Total Assets = Cash + AR + Inventory + Prepaid + Other Current Assets
+             + (Fixed Assets - Accumulated Depreciation) + Intangible Assets + Goodwill
+Total Equity = Retained Earnings + Owner Equity
+```
+
+Both are `metrics.MetricValue`s, `Available` only if at least one
+contributing code is present in the dataset for that period — a dataset
+with no balance-sheet data at all leaves every Total-Assets-or-Total-Equity-
+dependent ratio (`ReturnOnAssets`, `ReturnOnEquity`, `DebtToEquity`,
+`DebtToAssets`, `AssetTurnover`) `Unavailable`, not silently zero.
+
+#### What `Result` contains
+
+| Field | What it is |
+|---|---|
+| `History` | One `PeriodRatios` per period (chronological when `PeriodMeta` is supplied and complete, else dataset lexical order): every ratio below, the full `metrics.Snapshot`, and this package's own `TotalAssets`/`TotalEquity`. |
+| `Trends` | One `RatioTrend` per ratio metric with at least one available observation: a three-way `RatioTrendDirection` (`increasing`/`declining`/`stable`) from the first vs. last available observation, using the same fixed ±5% flat band (`TrendFlatBandPercent`) `analytics/workingcapital.Trend` uses. Empty unless `PeriodMeta` covers every period. |
+| `Comparisons` | Every adjacent-period `Comparison` (`FromValue`/`ToValue`/`Change`) for every ratio metric with at least one available observation — the finer-grained, every-adjacent-pair counterpart to `Trends`' first-vs-last view, and what `Signals` is derived from. Empty under the same condition as `Trends`. |
+| `Growth` | `RevenueGrowth`/`GrossProfitGrowth`/`EBITDAGrowth`/`NetIncomeGrowth` — period-over-period `GrowthPoint` series using the same `(to-from)/\|from\|` formula `financial/metrics.Trend` uses for its own YoY growth, but **not restricted to fiscal-year-to-fiscal-year comparisons** the way `metrics.Trend`'s MVP scope is (see `metrics.Trend`'s doc comment) — computed across whatever chronological sequence `Input.PeriodMeta` establishes. Empty under the same condition as `Trends`. |
+| `Signals` | Every deterministic health signal that triggered, in `SignalCode` declaration order. See [Deterministic health signals](#deterministic-health-signals-ratios) below. |
+| `Thresholds` | The resolved `Thresholds` (after `DefaultThresholds` substitution) this `Result` was computed under, so a persisted `Result` remains self-describing. |
+| `Warnings` / `Errors` | Structured `Issue`s (own `IssueCode` system) for input-level problems (`NO_PERIODS`, `NO_PERIOD_META`, `PERIOD_MISSING_FROM_META`). |
+
+#### Ratios computed
+
+Every ratio is a `Ratio` (`Metric`/`Period`/`Value`/`Formula`/`Components`,
+mirroring `metrics.MetricResult`'s shape), `Available` only when every
+required input is present **and** any denominator is present and nonzero
+— never a silent 0 or a divide-by-zero result:
+
+| Category | Ratio | Formula |
+|---|---|---|
+| Profitability | `GrossMargin` | Gross Profit / Total Revenue |
+| | `OperatingMargin` | EBIT / Total Revenue |
+| | `EBITDAMargin` | EBITDA / Total Revenue |
+| | `NetMargin` | Net Income / Total Revenue |
+| | `ReturnOnAssets` | Net Income / Total Assets |
+| | `ReturnOnEquity` | Net Income / Total Equity |
+| Liquidity | `CurrentRatio` | Current Assets / Current Liabilities |
+| | `QuickRatio` | (Cash + AR + Other Current Assets) / Current Liabilities |
+| | `CashRatio` | Cash / Current Liabilities |
+| Leverage | `DebtToEquity` | Total Debt / Total Equity |
+| | `DebtToAssets` | Total Debt / Total Assets |
+| | `DebtToEBITDA` | Total Debt / EBITDA |
+| | `NetDebtToEBITDA` | Net Debt / EBITDA |
+| | `InterestCoverage` | EBIT / Interest Expense |
+| Efficiency | `AssetTurnover` | Total Revenue / Total Assets |
+| | `ReceivablesTurnover` | Total Revenue / Accounts Receivable |
+| | `InventoryTurnover` | Total COGS / Inventory |
+| | `DaysSalesOutstanding` | (Accounts Receivable / Total Revenue) × 365 |
+| | `DaysInventoryOutstanding` | (Inventory / Total COGS) × 365 |
+| | `DaysPayableOutstanding` | (Accounts Payable / Total COGS) × 365 |
+| | `CashConversionCycle` | DSO + DIO − DPO |
+
+A negative result (e.g. `ReturnOnEquity` against an accumulated deficit, or
+`DebtToEBITDA` against negative EBITDA) is reported as computed, not
+suppressed — this package reports the arithmetic result of available data
+and leaves interpretation of an unusual figure to the caller.
+
+Every days-outstanding/`CashConversionCycle` ratio uses a **fixed 365-day
+year** (`daysInPeriod`), regardless of a period's actual granularity. A
+quarterly or monthly period's revenue/COGS is that period's own
+(non-annualized) figure, so this package deliberately does not attempt to
+annualize a sub-annual figure by multiplying by 4 or 12 — doing so would
+assume no seasonality, an assumption `analytics/workingcapital`'s
+`SeasonalProfile` exists specifically because it often does *not* hold. A
+caller comparing a quarterly DSO against an annual one must annualize the
+underlying revenue/COGS themselves first.
+
+#### Deterministic health signals {#deterministic-health-signals-ratios}
+
+Every signal is rule-based against caller-configurable `Thresholds`
+(`DefaultThresholds()` for the conservative defaults; the zero `Thresholds`
+passed to `Calculate` resolves to these) — **no AI, no opaque scoring, and
+no composite "health score"**: every signal reads only an already-computed
+`Comparison` or a single most-recent-period ratio level, so a caller can
+always trace a `Signal` back to the exact `Comparison`/`Ratio` it came
+from.
+
+| `SignalCode` | Triggers when |
+|---|---|
+| `WEAKENING_LIQUIDITY` | `CurrentRatio`'s most recent period-over-period `Comparison` declined by ≥ `LiquidityDeclineThreshold` (default 0.20). |
+| `RISING_LEVERAGE` | `DebtToEBITDA`'s most recent `Comparison` increased by ≥ `LeverageIncreaseThreshold` (default 0.50x). |
+| `MARGIN_COMPRESSION` | `EBITDAMargin`'s most recent `Comparison` declined by ≥ `MarginCompressionThreshold` (default 3 points). |
+| `SLOWING_COLLECTIONS` | `DaysSalesOutstanding`'s most recent `Comparison` increased by ≥ `CollectionsSlowdownDays` (default 10 days). |
+| `INVENTORY_BUILDUP` | `DaysInventoryOutstanding`'s most recent `Comparison` increased by ≥ `InventoryBuildupDays` (default 10 days). |
+| `WEAK_INTEREST_COVERAGE` | The most recent period's `InterestCoverage` is available and ≤ `WeakInterestCoverageRatio` (default 1.5x). |
+| `IMPROVING_PROFITABILITY` | `EBITDAMargin`'s most recent `Comparison` improved by ≥ `ProfitabilityChangeThreshold` (default 2 points). |
+| `DETERIORATING_PROFITABILITY` | `EBITDAMargin`'s most recent `Comparison` worsened by ≥ `ProfitabilityChangeThreshold` (default 2 points). |
+
+`MARGIN_COMPRESSION` and `DETERIORATING_PROFITABILITY` both read the same
+`EBITDAMargin` `Comparison` and commonly fire together on a meaningful
+decline (compression uses a less sensitive default threshold and names the
+specific concern; deteriorating/improving profitability is the more general
+directional signal the task's own signal list calls for as a separate
+bullet) — every signal carries its own `Code`, so a caller filters on
+whichever specific signal it cares about. Every `Signal` carries a stable
+`Code`, a `Severity` (`info`/`warning`/`critical`), the `Period` it
+concerns, a pre-filled `Message` (display only, never parsed), and the
+exact `Value`/`Threshold` compared.
+
+#### Exported surface, by file
+
+- **`types.go`** — `Input`, `Options`, `Result`, `PeriodInfo`/`PeriodType`,
+  `Component`, `Ratio`, the `RatioXxx` metric-name constants,
+  `PeriodRatios`, `GrowthPoint`, `Growth`, `RatioTrendDirection`/
+  `RatioTrend`, `Comparison`, `SignalCode`/`SignalSeverity`/`Signal`,
+  `IssueCode`/`IssueSeverity`/`Issue`, `HasErrors`, `FormulaVersion`,
+  `SignalRulesVersion`.
+- **`policy.go`** — `Thresholds`, `DefaultThresholds()`.
+- **`components.go`** — Total Assets/Total Equity/quick-assets/total-debt
+  sum-of-codes definitions and `sumCodes`.
+- **`index.go`** — the internal `codeIndex` lookup.
+- **`ratios.go`** — `Calculate(Input, Options) Result` and per-period ratio
+  wiring.
+- **`profitability.go`**, **`liquidity.go`**, **`leverage.go`**,
+  **`efficiency.go`** — every ratio formula in each category.
+- **`growth.go`** — the `Growth` period-over-period series.
+- **`trend.go`** — chronological ordering, `Trends`, `Comparisons`.
+- **`signals.go`** — every deterministic signal-trigger rule.
+
+See [`analytics/ratios/ratios_test.go`](analytics/ratios/ratios_test.go),
+[`analytics/ratios/signals_test.go`](analytics/ratios/signals_test.go),
+[`analytics/ratios/determinism_test.go`](analytics/ratios/determinism_test.go),
+and [`analytics/ratios/roundtrip_test.go`](analytics/ratios/roundtrip_test.go)
+for every scenario (normal case, zero denominators, negative equity,
+negative earnings, missing balance sheet, multi-year trend, every signal's
+positive and suppressed case, custom thresholds, and JSON/determinism)
+exercised against both the repository's realistic multi-year fixtures and
+hand-built minimal datasets.
+
 ### `valuation`
 
 Implements the individual valuation methods themselves: SDE multiple,
@@ -3501,6 +3674,8 @@ persist historical valuations").
 | QoE analysis formulas | `qoe.FormulaVersion`, echoed on `qoe.Result.FormulaVersion` | The fixed ratio formulas, `DefaultThresholds`, and flag-trigger rules (`analytics/qoe`) |
 | QoE heuristic score | `qoe.ScoreVersion`, echoed on `qoe.Score.Version` | The fixed baseline/deduction/clamp/label-band formula (`analytics/qoe`) — versioned separately from `qoe.FormulaVersion` since a caller may change how flags/ratios are computed independently of how they are weighted into one composite number |
 | Working-capital analysis formulas | `workingcapital.FormulaVersion`, echoed on `workingcapital.Result.FormulaVersion` | The NWC definition given an `InclusionPolicy`, the `Statistics`/`Trend`/`SeasonalProfile` formulas, and the `PegMethod` strategies (`analytics/workingcapital`) |
+| Ratio analysis formulas | `ratios.FormulaVersion`, echoed on `ratios.Result.FormulaVersion` | Every profitability/liquidity/leverage/efficiency/growth ratio formula, the Total Assets/Total Equity sum-of-codes definitions, and the `RatioTrend`/`Comparison` methodology (`analytics/ratios`) |
+| Ratio signal rules | `ratios.SignalRulesVersion`, echoed on `ratios.Result.SignalRulesVersion` | The fixed `DefaultThresholds` and every signal-trigger rule in `signals.go` (`analytics/ratios`) — versioned separately from `ratios.FormulaVersion` since a caller may change how ratios are computed independently of which signals are derived from them |
 | AI request/response schema | `ai.RequestSchemaVersion`, echoed on `ai.Provenance.RequestSchemaVersion` | The `Request`/`Response` wire shape `financial/classification/ai` sends to/expects from a `Classifier` |
 | AI fallback orchestration | `ai.OrchestrationVersion`, echoed on `ai.Provenance.OrchestrationVersion` | The trigger/fallback/safety decision logic in `ClassifyWithFallback`/`ClassifyBatchWithFallback` (which `FallbackMode` runs AI when, structural-row skipping, disagreement handling) |
 | OpenAI adapter (classification) | `openai.AdapterVersion`, echoed on `ai.Provenance.AdapterVersion` | This specific provider adapter's prompt-construction/response-parsing logic (`financial/classification/ai/openai`) |
@@ -3549,6 +3724,9 @@ unverified incidental property of the standard library).
 | `workingcapital.Result.ExcludedCodes` | Sorted by `Code` string |
 | `workingcapital.SeasonalProfile.Periods` | Sorted by `SequenceInYear` ascending |
 | `workingcapital.SuggestedPeg.PeriodsUsed` | Chronological, matching the period order `History` was built in |
+| `ratios.Result.History` | Chronological when `Input.PeriodMeta` covers every period in the dataset (by `FiscalYear`, then granularity, then `SequenceInYear`); falls back to `financial.FinancialDataset.Periods()`'s lexical order when `PeriodMeta` is nil/partial (`analytics/ratios`) |
+| `ratios.Result.Trends` / `Comparisons` | By `RatioXxx` metric-name declaration order; `Comparisons` then chronologically within each metric |
+| `ratios.Result.Signals` | By `SignalCode` declaration order, then by `Period` |
 
 ## Error taxonomy
 
@@ -3614,6 +3792,16 @@ message strings:
   `qoe`'s earnings-quality-analysis problem even though the two packages
   sit side by side under `analytics/` and follow the identical
   `Available`/`Warnings`/`Errors` shape.
+- **`ratios.Issue{Code ratios.IssueCode, Severity, Message}`** —
+  `analytics/ratios`' own separate system (`NO_PERIODS`, `NO_PERIOD_META`,
+  `PERIOD_MISSING_FROM_META`), a sixth system for the same reason as the
+  fourth and fifth above: an input-level ratio-analysis problem is its own
+  problem domain, distinct from `qoe`'s and `workingcapital`'s despite all
+  three packages sitting side by side under `analytics/` and sharing the
+  identical `Available`/`Warnings`/`Errors` shape. `ratios` also defines its
+  own separate `SignalCode` vocabulary (`WEAKENING_LIQUIDITY`,
+  `RISING_LEVERAGE`, etc.), mirroring `qoe.FlagCode`'s identical
+  input-problem/quality-signal split.
 - **`ai.Issue{RowID, Code ai.IssueCode, Severity, Message}`** —
   `financial/classification/ai`'s own separate system (`AI_DISABLED`,
   `AI_PROVIDER_UNAVAILABLE`, `AI_TIMEOUT`, `AI_PROVIDER_ERROR`,
