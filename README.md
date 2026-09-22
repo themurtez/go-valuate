@@ -257,6 +257,7 @@ go-valuate/
   financial/adjustments/     explicit normalization adjustments -> normalized EBITDA/SDE bridges
   financial/earnings/        maintainable-earnings selection across historical periods
   analytics/qoe/             quality-of-earnings analysis: adjustment burden, recurrence, flags, score
+  analytics/workingcapital/  operating working-capital history, statistics, seasonality, and peg analysis
   valuation/                 common valuation result envelope (value types, bridge, issues)
   valuation/sde/              SDE multiple method
   valuation/ebitda/           EBITDA multiple method
@@ -2215,6 +2216,124 @@ negative EBITDA, owner-heavy SDE, zero adjustments, missing/partial
 fixtures and hand-built minimal datasets sized to cross specific
 thresholds.
 
+### `analytics/workingcapital`
+
+Analyzes historical **operating working capital** from a normalized
+`financial.FinancialDataset` and supports transaction-style
+working-capital **peg** analysis: comparing a current/target NWC figure
+against a caller-selected historical benchmark and reporting the signed
+excess or deficit.
+
+There is no universal "deal definition" of operating working capital —
+whether cash, debt, taxes payable, or shareholder/related-party balances
+belong in the number is a negotiated, transaction-specific question. This
+package never hard-codes one: every `financial.Code` counted as an
+operating current asset or liability is controlled entirely by a
+caller-supplied `InclusionPolicy`, and every code present in the dataset
+but assigned to neither side is reported in `Result.ExcludedCodes` for
+auditability rather than silently dropped. Every function is pure — no
+I/O, no mutation of caller-owned input — and `Calculate` returns
+byte-for-byte identical JSON across repeated runs against identical input.
+
+```go
+res := workingcapital.Calculate(workingcapital.Input{
+    Dataset:    dataset,    // financial.FinancialDataset
+    PeriodMeta: periodMeta, // map[financial.Period]workingcapital.PeriodInfo
+    AsOf:       "2025-Q3",  // current transaction date's period (optional)
+}, workingcapital.Options{
+    PegMethod:       workingcapital.PegMethodTrailingAverage,
+    TrailingPeriods: 3,
+})
+
+fmt.Println(res.NWCStatistics.Average.Value, res.SuggestedPeg.Value, res.PegComparison.ExcessDeficit)
+```
+
+#### The `InclusionPolicy`
+
+```go
+type InclusionPolicy struct {
+    AssetCodes     []financial.Code // counted as operating current assets
+    LiabilityCodes []financial.Code // counted as operating current liabilities
+}
+```
+
+The zero value resolves to `DefaultInclusionPolicy()` (mirroring
+`review.Policy`/`qoe.Thresholds`' identical zero-value-means-defaults
+convention): every standard current-asset code **except cash**
+(`BS_ACCOUNTS_RECEIVABLE`, `BS_INVENTORY`, `BS_PREPAID`,
+`BS_CURRENT_ASSET_OTHER`) and every standard current-liability code
+**except short-term debt** (`BS_ACCOUNTS_PAYABLE`,
+`BS_CURRENT_LIABILITY_OTHER`) — the common convention that financing
+balances (cash, interest-bearing debt) are settled separately at close
+rather than trued up through a working-capital peg. A caller with a
+deal-specific convention (e.g. including cash, excluding part of "other")
+supplies its own policy; this repository's taxonomy has no dedicated codes
+for "taxes payable" or "shareholder/related-party balances" distinct from
+`BS_CURRENT_LIABILITY_OTHER`/`BS_CURRENT_ASSET_OTHER`, so isolating just
+one of those requires classifying it onto a distinct code upstream first.
+
+```
+Operating Current Assets (per InclusionPolicy.AssetCodes)
+- Operating Current Liabilities (per InclusionPolicy.LiabilityCodes)
+= Net Working Capital (PeriodNWC.NWC)
+```
+
+#### What `Result` contains
+
+| Field | What it is |
+|---|---|
+| `History` | One `PeriodNWC` per period (chronological when `PeriodMeta` is supplied and complete, else dataset lexical order): `OperatingCurrentAssets`/`OperatingCurrentLiabilities`/`NWC`, `Revenue` and `NWCPercentOfRevenue`, plus the full asset/liability `Component` bridge for that period. |
+| `NWCStatistics` / `NWCPercentOfRevenueStatistics` | `Statistics` — average, median, min, max, and volatility (sample standard deviation of the period-over-period percentage-change series, the same method `financial/metrics.Trend` uses for revenue/EBITDA volatility) across `History`'s available observations. |
+| `Trend` | A three-way `TrendDirection` (`increasing`/`declining`/`stable`) from comparing the first vs. last available `NWC` observation, using a fixed ±5% flat band (`TrendFlatBandPercent`) — never inferred from a display string. |
+| `SeasonalProfile` | Present only when `PeriodMeta` marks quarter or month periods: `NWCPercentOfRevenue` averaged by calendar position (`SequenceInYear`) across every fiscal year sharing it — e.g. every Q4 averaged together — revealing a recurring seasonal pattern. Empty (not an error) for an annual-only dataset. |
+| `SuggestedPeg` | The peg figure derived under `Options.PegMethod` (see below), plus which periods contributed to it. Zero value (`Method == ""`) if no method was requested — this package never picks a default peg method. |
+| `PegComparison` | `CurrentNWC` (from `Input.CurrentNWC` if supplied, else derived from `Dataset` at `Input.AsOf`) vs. `SuggestedPeg.Value`, and the signed `ExcessDeficit = CurrentNWC - Peg`. This package reports only the arithmetic difference — it does not decide deal-specific true-up/settlement mechanics. |
+| `ExcludedCodes` | Every balance-sheet `financial.Code` present in `Dataset` that `InclusionPolicy` assigned to neither side, sorted by `Code`. |
+| `InclusionPolicy` | The resolved policy (after `DefaultInclusionPolicy` substitution) this `Result` was computed under, so a persisted `Result` remains self-describing. |
+| `Warnings` / `Errors` | Structured `Issue`s (own `IssueCode` system — see [Error taxonomy](#error-taxonomy)) for input-level problems (`NO_PERIODS`, `NO_PERIOD_META`, `PERIOD_MISSING_FROM_META`, `NO_REVENUE_DATA`, `EMPTY_INCLUSION_POLICY`, `PEG_METHOD_UNAVAILABLE`, `CURRENT_NWC_UNAVAILABLE`). |
+
+#### Peg methods
+
+`Options.PegMethod` selects a deterministic strategy over `History`'s
+available `NWC` observations — mirroring `financial/earnings.Strategy`'s
+identical "pick a method, get an auditable trail" design. **This package
+never invents a "market" peg** — every method reduces to arithmetic over
+the caller's own historical series or a caller-supplied fixed figure:
+
+| `PegMethod` | Derivation |
+|---|---|
+| `latest` | The single most recent available `NWC` observation. |
+| `simple_average` | Unweighted arithmetic mean of every available observation. |
+| `median` | Median of every available observation. |
+| `trailing_average` | Unweighted arithmetic mean of the most recent `Options.TrailingPeriods` available observations. Unavailable (with `PEG_METHOD_UNAVAILABLE`) if `TrailingPeriods` is unset or exceeds the number of available observations. |
+| `fixed` | `Options.FixedPeg` verbatim — for a peg dollar figure already negotiated outside this package (e.g. from a letter of intent). Uses no historical periods. |
+
+#### Exported surface, by file
+
+- **`types.go`** — `Input`, `Options`, `Result`, `PeriodInfo`/`PeriodType`,
+  `NWCValue`/`Unavailable`/`AvailableValue`, `Component`, `PeriodNWC`,
+  `Statistics`, `Trend`/`TrendDirection`, `SeasonalProfile`/
+  `SeasonalPeriod`, `PegMethod`, `SuggestedPeg`, `PegComparison`,
+  `IssueCode`/`IssueSeverity`/`Issue`, `HasErrors`, `FormulaVersion`.
+- **`policy.go`** — `InclusionPolicy`, `DefaultInclusionPolicy()`.
+- **`workingcapital.go`** — `Calculate(Input, Options) Result`, per-period
+  NWC/revenue computation, chronological ordering, and current-NWC
+  resolution.
+- **`stats.go`** — `Statistics`/`Trend` computation (average, median, min,
+  max, volatility, direction).
+- **`seasonal.go`** — `SeasonalProfile` computation.
+- **`peg.go`** — every `PegMethod` strategy and `PegComparison`.
+
+See [`analytics/workingcapital/workingcapital_test.go`](analytics/workingcapital/workingcapital_test.go),
+[`analytics/workingcapital/peg_test.go`](analytics/workingcapital/peg_test.go),
+[`analytics/workingcapital/stats_test.go`](analytics/workingcapital/stats_test.go), and
+[`analytics/workingcapital/seasonal_test.go`](analytics/workingcapital/seasonal_test.go)
+for every scenario (seasonal retail business, stable/declining/increasing
+NWC, cash/debt inclusion and exclusion, negative working capital, missing
+revenue, quarterly-vs-annual comparability, every peg method's excess/
+deficit comparison, and JSON/determinism) exercised against both the
+repository's realistic multi-year fixtures and hand-built minimal datasets.
+
 ### `valuation`
 
 Implements the individual valuation methods themselves: SDE multiple,
@@ -3381,6 +3500,7 @@ persist historical valuations").
 | Review schema | `review.SchemaVersion`, echoed on `review.Plan.Version` | `ReviewItem`/`Plan`/`Decision`/`ApplyResult` shapes and the deterministic ID/severity/readiness rules that produce them (`review`) |
 | QoE analysis formulas | `qoe.FormulaVersion`, echoed on `qoe.Result.FormulaVersion` | The fixed ratio formulas, `DefaultThresholds`, and flag-trigger rules (`analytics/qoe`) |
 | QoE heuristic score | `qoe.ScoreVersion`, echoed on `qoe.Score.Version` | The fixed baseline/deduction/clamp/label-band formula (`analytics/qoe`) — versioned separately from `qoe.FormulaVersion` since a caller may change how flags/ratios are computed independently of how they are weighted into one composite number |
+| Working-capital analysis formulas | `workingcapital.FormulaVersion`, echoed on `workingcapital.Result.FormulaVersion` | The NWC definition given an `InclusionPolicy`, the `Statistics`/`Trend`/`SeasonalProfile` formulas, and the `PegMethod` strategies (`analytics/workingcapital`) |
 | AI request/response schema | `ai.RequestSchemaVersion`, echoed on `ai.Provenance.RequestSchemaVersion` | The `Request`/`Response` wire shape `financial/classification/ai` sends to/expects from a `Classifier` |
 | AI fallback orchestration | `ai.OrchestrationVersion`, echoed on `ai.Provenance.OrchestrationVersion` | The trigger/fallback/safety decision logic in `ClassifyWithFallback`/`ClassifyBatchWithFallback` (which `FallbackMode` runs AI when, structural-row skipping, disagreement handling) |
 | OpenAI adapter (classification) | `openai.AdapterVersion`, echoed on `ai.Provenance.AdapterVersion` | This specific provider adapter's prompt-construction/response-parsing logic (`financial/classification/ai/openai`) |
@@ -3425,6 +3545,10 @@ unverified incidental property of the standard library).
 | `qoe.Result.Flags` | `FlagCode` declaration order (`LARGE_NORMALIZATION_BURDEN` through `NEGATIVE_OR_NEAR_ZERO_MAINTAINABLE_EARNINGS`), then by `Period` within a code — never a severity-ranked priority queue, since a QoE flag list is read as a checklist |
 | `ai.BatchOutcome.Outcomes` (`financial/classification/ai`) | Input order preserved exactly: `Outcomes[i]` always corresponds to the `i`-th row passed to `ClassifyBatchWithFallback` |
 | `ai.BatchOutcome.Outcomes` (`financial/adjustments/ai`) | Input order preserved exactly: `Outcomes[i]` always corresponds to the `i`-th `Request` passed to `SuggestAdjustmentsBatch` |
+| `workingcapital.Result.History` | Chronological when `Input.PeriodMeta` covers every period in the dataset (by `FiscalYear`, then granularity, then `SequenceInYear`); falls back to `financial.FinancialDataset.Periods()`'s lexical order when `PeriodMeta` is nil/partial (`analytics/workingcapital`) |
+| `workingcapital.Result.ExcludedCodes` | Sorted by `Code` string |
+| `workingcapital.SeasonalProfile.Periods` | Sorted by `SequenceInYear` ascending |
+| `workingcapital.SuggestedPeg.PeriodsUsed` | Chronological, matching the period order `History` was built in |
 
 ## Error taxonomy
 
@@ -3481,6 +3605,15 @@ message strings:
   *problem* — mirroring how `orchestrator.ExclusionReason` and
   `applicability.Reason` sit alongside this taxonomy without being folded
   into it (see below).
+- **`workingcapital.Issue{Code workingcapital.IssueCode, Severity, Message}`**
+  — `analytics/workingcapital`'s own separate system (`NO_PERIODS`,
+  `NO_PERIOD_META`, `PERIOD_MISSING_FROM_META`, `NO_REVENUE_DATA`,
+  `EMPTY_INCLUSION_POLICY`, `PEG_METHOD_UNAVAILABLE`,
+  `CURRENT_NWC_UNAVAILABLE`), a fifth system: an input-level
+  working-capital-analysis problem is a different problem domain from
+  `qoe`'s earnings-quality-analysis problem even though the two packages
+  sit side by side under `analytics/` and follow the identical
+  `Available`/`Warnings`/`Errors` shape.
 - **`ai.Issue{RowID, Code ai.IssueCode, Severity, Message}`** —
   `financial/classification/ai`'s own separate system (`AI_DISABLED`,
   `AI_PROVIDER_UNAVAILABLE`, `AI_TIMEOUT`, `AI_PROVIDER_ERROR`,
