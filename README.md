@@ -259,6 +259,7 @@ go-valuate/
   analytics/qoe/             quality-of-earnings analysis: adjustment burden, recurrence, flags, score
   analytics/workingcapital/  operating working-capital history, statistics, seasonality, and peg analysis
   analytics/ratios/          financial-ratio suite: profitability/liquidity/leverage/efficiency/growth, trends, signals
+  analytics/cashflow/        EBITDA-to-free-cash-flow bridge, conversion ratios, coverage, burn/runway
   valuation/                 common valuation result envelope (value types, bridge, issues)
   valuation/sde/              SDE multiple method
   valuation/ebitda/           EBITDA multiple method
@@ -2507,6 +2508,143 @@ positive and suppressed case, custom thresholds, and JSON/determinism)
 exercised against both the repository's realistic multi-year fixtures and
 hand-built minimal datasets.
 
+### `analytics/cashflow`
+
+A deterministic **cash-flow and cash-conversion analysis** for SMB advisory
+and transaction (M&A) use: a period-by-period bridge from EBITDA to free
+cash flow, EBITDA-to-cash conversion ratios, debt-service and
+owner-distribution coverage, recurring cash drains, and (for loss-making
+businesses) a cash burn/runway estimate.
+
+This repository's canonical `financial.Code` taxonomy has no dedicated
+codes for a cash-flow statement, capital expenditures, debt-service
+principal/interest, or owner distributions — those figures vary too much in
+how source systems report them to force into one flat code list. So this
+package recomputes EBITDA (`financial/metrics`) and the period-over-period
+change in net working capital (`analytics/workingcapital`) itself directly
+from `Input.Dataset`, exactly as `analytics/qoe` and `analytics/ratios`
+already do for `financial/metrics`, and takes operating cash flow, capex,
+debt service, owner distributions, and cash taxes paid as **caller-supplied,
+per-period `CashFlowValue` figures** — this package never invents a
+canonical source for them.
+
+**Nothing is inferred from EBITDA unless a caller explicitly opts in** via
+`Options.AllowEBITDAEstimate`. When it does, the affected `CashFlowValue`
+carries `IsEstimate == true` and a populated `EstimateBasis` explaining
+exactly how it was derived, and `Result.Warnings` notes that estimation
+occurred — this package never blends a reported figure and an estimated one
+into one undifferentiated number. Every function is pure — no I/O, no
+mutation of caller-owned input — and `Calculate` returns byte-for-byte
+identical JSON across repeated runs against identical input.
+
+```go
+res := cashflow.Calculate(cashflow.Input{
+    Dataset:    dataset,    // financial.FinancialDataset
+    PeriodMeta: periodMeta, // map[financial.Period]metrics.PeriodInfo
+    OperatingCashFlow: map[financial.Period]cashflow.CashFlowValue{
+        "2025": cashflow.Reported(320_000),
+    },
+    Capex: map[financial.Period]cashflow.CashFlowValue{
+        "2025": cashflow.Reported(40_000),
+    },
+    DebtService: map[financial.Period]cashflow.DebtServiceFigure{
+        "2025": {Principal: cashflow.Reported(50_000), Interest: cashflow.Reported(10_000)},
+    },
+}, cashflow.Options{AllowEBITDAEstimate: true}) // opt-in EBITDA-based estimate for periods with no reported OCF
+
+last := res.History[len(res.History)-1]
+fmt.Println(last.FreeCashFlow.Value, last.FreeCashFlowToOwner.Value)
+```
+
+#### The EBITDA-to-free-cash-flow bridge
+
+```
+EBITDA (financial/metrics.Snapshot.EBITDA, recomputed from Dataset)
+- Change in Net Working Capital (analytics/workingcapital, under Input.Policy)
+= Operating Cash Flow  (reported, or an EBITDA-based estimate — see below)
+- Capex
+= Free Cash Flow
++ Interest (Bridge.DebtService.Interest)
+= Free Cash Flow to Firm     (all-capital-providers figure; pre-tax-shield approximation — this
+                               package has no tax-rate input to tax-affect interest with)
+- Debt Service (Principal + Interest)
+= Free Cash Flow to Owner    (cash an owner can draw without impairing the business or
+                               defaulting on debt)
+```
+
+Every step is an independently `Available` `CashFlowValue`/`MetricValue` —
+a missing `Capex` figure does not block `FreeCashFlow` (it is treated as
+zero, with `IsEstimate`/`EstimateBasis` noting exactly that assumption, so a
+caller can never mistake "not supplied" for "confirmed to be zero" — see
+`Bridge.FreeCashFlow`'s doc comment), and a missing `DebtService` figure
+leaves only `FreeCashFlowToFirm`/`FreeCashFlowToOwner` unavailable rather
+than the whole bridge.
+
+#### The EBITDA-based estimate (opt-in only)
+
+With `Options.AllowEBITDAEstimate: true`, a period with no reported
+`Input.OperatingCashFlow` gets `EBITDA - ChangeInNWC` instead, **only** when
+both are available (in particular, never for the earliest period in a
+series, which has no preceding period to diff `ChangeInNWC` against). The
+resulting `CashFlowValue` carries `IsEstimate: true` and
+`EstimateBasis: "EBITDA - change in net working capital; no reported
+operating cash flow supplied for this period"` — grep-able and
+programmatically filterable, never buried in a display string. Without the
+opt-in, an unreported period's `OperatingCashFlow` (and everything
+downstream of it) is simply `Unavailable()`, and `Result.Warnings` carries
+`NO_CASH_FLOW_STATEMENT` instead.
+
+#### What `Result` contains
+
+| Field | What it is |
+|---|---|
+| `History` | One `Bridge` per period (chronological when `PeriodMeta` is supplied and complete, else dataset lexical order): the full EBITDA-to-free-cash-flow walk above, plus `OwnerDistributions` and `CashTaxesPaid` echoed verbatim from `Input`. |
+| `Conversion` | One `ConversionRatios` per period: `EBITDAToOperatingCashFlow` and `EBITDAToFreeCashFlow` — how much of EBITDA actually became cash. |
+| `OperatingCashFlowTrend` / `FreeCashFlowTrend` / `ConversionTrend` | A three-way `TrendDirection` (`increasing`/`declining`/`stable`) from the first vs. last available observation, using the same fixed ±5% flat band (`TrendFlatBandPercent`) `analytics/workingcapital.Trend` and `analytics/ratios.RatioTrend` use. |
+| `RecurringDrains` | Four fixed `RecurringDrain` entries (`capex`, `working_capital_build`, `debt_service`, `owner_distributions`), each with `TotalAmount` across `History` and `AverageOfEBITDA` — recurring cash outflows that reduce owner cash even when EBITDA looks healthy. |
+| `CashRunway` | `Available` only when average monthly operating cash flow is negative (i.e. the business is actually burning cash): `MonthlyBurnRate`, `CurrentCashBalance` (most recent `Input.CashBalance`), and `MonthsOfRunway`. A profitable business gets `Available == false`, never an infinite or nonsensical runway figure. |
+| `Flags` | Deterministic, `Thresholds`-driven signals (see below), ordered by `FlagCode`'s declaration order, then `Period`. |
+| `Warnings` / `Errors` | Structured `Issue`s (own `IssueCode` system — see [Error taxonomy](#error-taxonomy)) for input-level problems (`NO_PERIODS`, `NO_PERIOD_META`, `PERIOD_MISSING_FROM_META`, `NO_CASH_FLOW_STATEMENT`, `ESTIMATED_FROM_EBITDA`). |
+
+#### Flags
+
+`Options.Thresholds` (zero value resolves to `DefaultThresholds()`, the
+same zero-value-means-defaults convention every other package's policy type
+uses) configures seven rule-based, deterministic triggers evaluated against
+the most recent period in `History`: `WEAK_CASH_CONVERSION`,
+`HIGH_CAPEX_BURDEN`, `HIGH_WORKING_CAPITAL_BURDEN`,
+`LOW_DEBT_SERVICE_COVERAGE`, `DISTRIBUTIONS_EXCEED_FREE_CASH_FLOW`,
+`LOW_CASH_RUNWAY`, and `DECLINING_CONVERSION_TREND`. Every `Flag` carries a
+stable `Code`, a `Severity` (`info`/`warning`/`critical`), the specific
+`Value`/`Threshold` compared, and a pre-filled `Message` (display only,
+never parsed) — no AI/LLM, no opaque scoring, mirroring `analytics/qoe.Flag`
+and `analytics/ratios.Signal`'s identical design.
+
+#### Exported surface, by file
+
+- **`types.go`** — `Input`, `Options`, `Result`, `PeriodInfo`/`PeriodType`,
+  `CashFlowValue`/`Unavailable`/`Reported`/`Estimated`, `DebtServiceFigure`,
+  `Bridge`, `ConversionRatios`, `TrendDirection`/`Trend`, `RecurringDrain`/
+  `RecurringDrainCategory`, `CashRunway`, `Thresholds`/`DefaultThresholds()`,
+  `FlagCode`/`FlagSeverity`/`Flag`, `IssueCode`/`IssueSeverity`/`Issue`,
+  `HasErrors`, `FormulaVersion`.
+- **`cashflow.go`** — `Calculate(Input, Options) Result`: recomputes
+  `financial/metrics` and `analytics/workingcapital` internally, builds each
+  period's `Bridge`, and wires every other section together.
+- **`trend.go`** — `Trend` computation for the OCF/FCF/conversion series.
+- **`drains.go`** — `RecurringDrains` aggregation.
+- **`runway.go`** — `CashRunway` burn-rate/runway computation.
+- **`flags.go`** — every deterministic flag-trigger rule.
+
+See [`analytics/cashflow/cashflow_test.go`](analytics/cashflow/cashflow_test.go),
+[`analytics/cashflow/determinism_test.go`](analytics/cashflow/determinism_test.go),
+and [`analytics/cashflow/roundtrip_test.go`](analytics/cashflow/roundtrip_test.go)
+for every scenario (strong/weak conversion, working-capital build,
+capex-heavy, negative cash flow/runway, missing cash-flow statement, the
+estimate-vs-reported distinction, debt-service and distribution coverage,
+and JSON/determinism) exercised against both the repository's realistic
+multi-year fixtures and hand-built minimal datasets.
+
 ### `valuation`
 
 Implements the individual valuation methods themselves: SDE multiple,
@@ -3676,6 +3814,7 @@ persist historical valuations").
 | Working-capital analysis formulas | `workingcapital.FormulaVersion`, echoed on `workingcapital.Result.FormulaVersion` | The NWC definition given an `InclusionPolicy`, the `Statistics`/`Trend`/`SeasonalProfile` formulas, and the `PegMethod` strategies (`analytics/workingcapital`) |
 | Ratio analysis formulas | `ratios.FormulaVersion`, echoed on `ratios.Result.FormulaVersion` | Every profitability/liquidity/leverage/efficiency/growth ratio formula, the Total Assets/Total Equity sum-of-codes definitions, and the `RatioTrend`/`Comparison` methodology (`analytics/ratios`) |
 | Ratio signal rules | `ratios.SignalRulesVersion`, echoed on `ratios.Result.SignalRulesVersion` | The fixed `DefaultThresholds` and every signal-trigger rule in `signals.go` (`analytics/ratios`) — versioned separately from `ratios.FormulaVersion` since a caller may change how ratios are computed independently of which signals are derived from them |
+| Cash-flow analysis formulas | `cashflow.FormulaVersion`, echoed on `cashflow.Result.FormulaVersion` | The EBITDA-to-free-cash-flow bridge, every conversion ratio, the `RecurringDrains`/`CashRunway` formulas, the `DefaultThresholds` flag-trigger rules, and the EBITDA-based estimate method used under `Options.AllowEBITDAEstimate` (`analytics/cashflow`) |
 | AI request/response schema | `ai.RequestSchemaVersion`, echoed on `ai.Provenance.RequestSchemaVersion` | The `Request`/`Response` wire shape `financial/classification/ai` sends to/expects from a `Classifier` |
 | AI fallback orchestration | `ai.OrchestrationVersion`, echoed on `ai.Provenance.OrchestrationVersion` | The trigger/fallback/safety decision logic in `ClassifyWithFallback`/`ClassifyBatchWithFallback` (which `FallbackMode` runs AI when, structural-row skipping, disagreement handling) |
 | OpenAI adapter (classification) | `openai.AdapterVersion`, echoed on `ai.Provenance.AdapterVersion` | This specific provider adapter's prompt-construction/response-parsing logic (`financial/classification/ai/openai`) |
@@ -3727,6 +3866,9 @@ unverified incidental property of the standard library).
 | `ratios.Result.History` | Chronological when `Input.PeriodMeta` covers every period in the dataset (by `FiscalYear`, then granularity, then `SequenceInYear`); falls back to `financial.FinancialDataset.Periods()`'s lexical order when `PeriodMeta` is nil/partial (`analytics/ratios`) |
 | `ratios.Result.Trends` / `Comparisons` | By `RatioXxx` metric-name declaration order; `Comparisons` then chronologically within each metric |
 | `ratios.Result.Signals` | By `SignalCode` declaration order, then by `Period` |
+| `cashflow.Result.History` / `Conversion` | Chronological when `Input.PeriodMeta` covers every period in the dataset (by `FiscalYear`, then granularity, then `SequenceInYear`); falls back to `financial.FinancialDataset.Periods()`'s lexical order when `PeriodMeta` is nil/partial (`analytics/cashflow`) |
+| `cashflow.Result.RecurringDrains` | Fixed `RecurringDrainCategory` declaration order (`capex`, `working_capital_build`, `debt_service`, `owner_distributions`) — always all four entries, never Go map order |
+| `cashflow.Result.Flags` | `FlagCode` declaration order (`WEAK_CASH_CONVERSION` through `DECLINING_CONVERSION_TREND`), then by `Period` within a code |
 
 ## Error taxonomy
 
@@ -3802,6 +3944,20 @@ message strings:
   own separate `SignalCode` vocabulary (`WEAKENING_LIQUIDITY`,
   `RISING_LEVERAGE`, etc.), mirroring `qoe.FlagCode`'s identical
   input-problem/quality-signal split.
+- **`cashflow.Issue{Code cashflow.IssueCode, Severity, Message}`** —
+  `analytics/cashflow`'s own separate system (`NO_PERIODS`,
+  `NO_PERIOD_META`, `PERIOD_MISSING_FROM_META`, `NO_CASH_FLOW_STATEMENT`,
+  `ESTIMATED_FROM_EBITDA`), a seventh system for the same reason as the
+  fourth through sixth above: an input-level cash-flow-analysis problem is
+  its own problem domain, distinct from its `analytics/` siblings despite
+  the identical `Available`/`Warnings`/`Errors` shape.
+  `NO_CASH_FLOW_STATEMENT`/`ESTIMATED_FROM_EBITDA` specifically flag the
+  reported-vs-estimated distinction this package's `CashFlowValue.IsEstimate`
+  carries at the per-figure level (see the package's own README section).
+  `cashflow` also defines its own separate `FlagCode` vocabulary
+  (`WEAK_CASH_CONVERSION`, `LOW_DEBT_SERVICE_COVERAGE`, etc.), mirroring
+  `qoe.FlagCode`/`ratios.SignalCode`'s identical input-problem/quality-signal
+  split.
 - **`ai.Issue{RowID, Code ai.IssueCode, Severity, Message}`** —
   `financial/classification/ai`'s own separate system (`AI_DISABLED`,
   `AI_PROVIDER_UNAVAILABLE`, `AI_TIMEOUT`, `AI_PROVIDER_ERROR`,
