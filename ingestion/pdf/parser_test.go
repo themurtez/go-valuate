@@ -97,6 +97,10 @@ func TestParse_SinglePageIncomeStatement(t *testing.T) {
 	if netIncome.Kind != ingestion.StructuralTotal {
 		t.Errorf("Net Income Kind = %q, want total", netIncome.Kind)
 	}
+
+	if stmt.SchemaVersion != ingestion.SchemaVersion {
+		t.Errorf("SchemaVersion = %q, want %q", stmt.SchemaVersion, ingestion.SchemaVersion)
+	}
 }
 
 // --- Multiple periods -----------------------------------------------------

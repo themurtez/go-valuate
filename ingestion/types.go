@@ -917,12 +917,30 @@ type OCRMetadata struct {
 	UnsupportedScanPageCount int `json:"unsupported_scan_page_count,omitempty"`
 }
 
+// SchemaVersion identifies this package's fixed Result shape: the exact set
+// and meaning of fields across Row, Cell, Metadata, DetectedPeriod, Warning,
+// and OCR-specific metadata (OCRProvenance, OCRMetadata) that together make
+// up a parsed ingestion contract, produced by every format (csv.Parse,
+// xlsx.Parse, ingestion/pdf) via the shared BuildResult entry point. Bump
+// this whenever a field is added, removed, or changes meaning in a way that
+// could make a persisted historical Result not reproduce identically under
+// the new code — see the repository README's versioning-strategy section
+// and financial/metrics.FormulaVersion for the same convention applied
+// elsewhere. Echoed on every Result so a persisted historical parse remains
+// self-describing about exactly which ingestion contract produced it.
+const SchemaVersion = "1.0.0"
+
 // Result is the complete output of parsing a single tabular financial
 // document: every structurally interpreted row, detection metadata, and
 // non-fatal warnings. A Result is always returned together with a nil
 // error on success; Error is returned alone (with a zero-value Result) on
 // fatal failure — see csv.Parse and xlsx.Parse.
 type Result struct {
+	// SchemaVersion identifies which version of this package's fixed Result
+	// shape produced this value — see the SchemaVersion constant's doc
+	// comment. Always populated by BuildResult; a zero value means this
+	// Result was constructed directly rather than via a parser.
+	SchemaVersion string `json:"schema_version"`
 	// Rows is every non-blank row read from the selected sheet, in
 	// original source order (stable — see the package README's
 	// determinism guarantees). Blank rows are omitted from Rows but do

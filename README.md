@@ -3190,6 +3190,7 @@ persist historical valuations").
 | Version | Constant | Scope |
 |---|---|---|
 | Canonical taxonomy | `financial.TaxonomyVersion` | The fixed set of `financial.Code` values and their `CodeMeta` (`financial/taxonomy.go`) |
+| Ingestion schema | `ingestion.SchemaVersion`, echoed on `ingestion.Result.SchemaVersion` | The fixed `Result` shape (`Row`, `Cell`, `Metadata`, `DetectedPeriod`, `Warning`, and OCR-specific `OCRProvenance`/`OCRMetadata`) produced by every format — `csv.Parse`, `xlsx.Parse`, `ingestion/pdf` — via the shared `BuildResult` entry point (`ingestion`) |
 | Classification rules | `classification.DefaultRulesVersion` | The built-in rule set `DefaultRules()` returns (`financial/classification`) — a caller's own custom `Config.Rules` versions independently |
 | Metrics formulas | `metrics.FormulaVersion`, echoed on `metrics.Result.FormulaVersion` | The fixed metric formula table (`financial/metrics`) |
 | Adjustment semantics | `adjustments.SemanticsVersion`, echoed on `adjustments.Result.SemanticsVersion` | The default Targets/Effect table and bridge formulas (`financial/adjustments`) |
@@ -3306,16 +3307,22 @@ message strings:
   different problem domain from classification-fallback validation (is
   this code in the closed set?), even though both packages sit under the
   same "optional AI capability" umbrella.
+- **`financial.ValidationError{SourceID, Index, Code
+  financial.ValidationErrorCode, Reason}`** — the one system in this list
+  that is a genuine Go `error` (returned as `financial.ValidationErrors`,
+  a `[]*ValidationError`, inspectable via `errors.As`) rather than a
+  `Result.Errors` entry, since a malformed row is a true parse/validate
+  failure `Normalize` cannot proceed past, not a domain outcome a
+  `Result.Available` flag can represent. `Code` is stable and matchable
+  exactly like the six systems above (`UNRECOGNIZED_STATUS`,
+  `MISSING_CODE`); a caller must branch on `Code`, never parse `Reason`,
+  which is free text.
 
 Two structured-but-not-error-severity vocabularies exist alongside these
 and are not folded in, since they already serve the "stable, matchable"
 purpose this taxonomy is for: `orchestrator.ExclusionReason` (why a method
 never ran) and `applicability.Reason{Kind, Detail, Points}` (a scoring
-contribution, not a failure). A genuine `Normalize`-level structural
-failure (a malformed row) still returns a real Go `error`
-(`financial.ValidationErrors`, inspectable via `errors.As`) — that
-boundary is a true parse/validate failure, not a domain outcome a
-`Result.Available` flag can represent.
+contribution, not a failure).
 
 This is deliberately a small, flat set of additions — not a new
 framework — sized to what a future consuming application actually needs

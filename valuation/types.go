@@ -211,6 +211,17 @@ func Warnings(issues []Issue) []Issue {
 }
 
 // HasErrors reports whether any Issue in issues has SeverityError.
+//
+// This trivial scan is duplicated verbatim in financial/adjustments
+// (HasErrors over adjustments.Issue) and review (HasErrors over
+// review.Issue) rather than factored into one shared helper: the three
+// Issue types are independent concrete structs with independently-scoped
+// Severity/IssueCode enums (see this type's own doc comment on why — the
+// same reasoning review.IssueSeverity's doc comment gives), so a shared
+// helper would need a new generic constraint or interface spanning three
+// packages' public types purely to save a four-line loop. That coupling
+// cost was judged higher than the duplication it would remove; keep these
+// three independent.
 func HasErrors(issues []Issue) bool {
 	for _, iss := range issues {
 		if iss.Severity == SeverityError {

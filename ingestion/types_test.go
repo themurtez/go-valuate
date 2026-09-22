@@ -8,6 +8,7 @@ import (
 	"github.com/themurtez/go-valuate/financial"
 	"github.com/themurtez/go-valuate/ingestion"
 	icsv "github.com/themurtez/go-valuate/ingestion/csv"
+	ixlsx "github.com/themurtez/go-valuate/ingestion/xlsx"
 )
 
 func TestResultJSONRoundTrip(t *testing.T) {
@@ -30,6 +31,44 @@ func TestResultJSONRoundTrip(t *testing.T) {
 	}
 	if string(first) != string(second) {
 		t.Errorf("round-trip mismatch:\nfirst:  %s\nsecond: %s", first, second)
+	}
+}
+
+func TestResultSchemaVersionPopulatedByCSV(t *testing.T) {
+	res, err := icsv.Parse(strings.NewReader("Account,2023,2024\nRevenue,1000,1200\n"), ingestion.Options{})
+	if err != nil {
+		t.Fatalf("Parse: %+v", err)
+	}
+	if res.SchemaVersion != ingestion.SchemaVersion {
+		t.Errorf("SchemaVersion = %q, want %q", res.SchemaVersion, ingestion.SchemaVersion)
+	}
+	if res.SchemaVersion == "" {
+		t.Error("SchemaVersion must not be empty")
+	}
+}
+
+func TestResultSchemaVersionPopulatedByXLSX(t *testing.T) {
+	res, err := ixlsx.Parse(openFixture(t, "multi_sheet_workbook.xlsx"), ingestion.Options{})
+	if err != nil {
+		t.Fatalf("Parse: %+v", err)
+	}
+	if res.SchemaVersion != ingestion.SchemaVersion {
+		t.Errorf("SchemaVersion = %q, want %q", res.SchemaVersion, ingestion.SchemaVersion)
+	}
+}
+
+// TestResultSchemaVersionPopulatedOnAmbiguousSheetSelection covers the one
+// Result construction path that does not go through the shared
+// ingestion.BuildResult entry point (xlsx.Parse's early return when sheet
+// selection is ambiguous — see ingestion/xlsx/parser.go) to guard against
+// SchemaVersion silently regressing to empty on that path specifically.
+func TestResultSchemaVersionPopulatedOnAmbiguousSheetSelection(t *testing.T) {
+	res, err := ixlsx.Parse(openFixture(t, "ambiguous_workbook.xlsx"), ingestion.Options{})
+	if err != nil {
+		t.Fatalf("Parse: %+v", err)
+	}
+	if res.SchemaVersion != ingestion.SchemaVersion {
+		t.Errorf("SchemaVersion = %q, want %q", res.SchemaVersion, ingestion.SchemaVersion)
 	}
 }
 

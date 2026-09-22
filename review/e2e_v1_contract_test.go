@@ -456,6 +456,9 @@ Net Income,202000,235000
 	// ---------------------------------------------------------------
 	// Final assertions (section 20's explicit checklist).
 	// ---------------------------------------------------------------
+	if ingestResult.SchemaVersion == "" {
+		t.Error("expected a populated ingestion.Result.SchemaVersion")
+	}
 	if rpt.SchemaVersion == "" {
 		t.Error("expected a populated report.SchemaVersion")
 	}

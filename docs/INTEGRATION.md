@@ -180,6 +180,25 @@ No security middleware is implemented here, and none should be — this
 section documents boundaries this library assumes its caller enforces, not
 an in-library enforcement mechanism.
 
+## Error handling
+
+**A main application must branch on a stable `Code` field, never on a
+`Message`/`Reason`/`Detail` string.** Every structured issue/error type this
+library exposes carries one (see the README's
+[Error taxonomy](../README.md#error-taxonomy) for the full nine-system
+list and [`V1_CONTRACTS.md`](V1_CONTRACTS.md#error-and-issue-contracts) for
+the caller-facing index): `ingestion.Error.Code`/`ingestion.Warning.Code`,
+`financial.ValidationError.Code`, `valuation.Issue.Code` (and every method
+package's own extensions), `adjustments.Issue.Code`, `review.Issue.Code`,
+`reconciliation.Check.Code`, and both AI packages' `ai.Issue.Code`. Message
+strings are for humans and are not guaranteed stable across versions — a
+wording change is not treated as a breaking change by this library's own
+versioning strategy, since only `Code` is the contract. A UI wanting a
+specific localized/branded message per error should maintain its own
+`Code -> display string` mapping rather than rendering `Message`/`Reason`
+directly, or should treat the library string as a developer-diagnostic
+fallback only.
+
 ## Persistence snapshot guidance
 
 This library performs no persistence — everything below is guidance for
@@ -209,7 +228,7 @@ read.
 | Candidate | Source | Why |
 |---|---|---|
 | Source document metadata | main app (filename, upload date, content type) | provenance — this library never retains the source document itself |
-| Parsed/raw line items | `ingestion.Result`/`Results`, `financial.RawLineItem[]` | reproducibility of what classification saw |
+| Parsed/raw line items | `ingestion.Result`/`Results` (already `SchemaVersion`-stamped), `financial.RawLineItem[]` | reproducibility of what classification saw |
 | Confirmed mappings | `financial.MappedLineItem[]` (post-`review.Apply`) | the actual classification decisions used, including any human override |
 | Review decisions | `review.Plan`, `[]review.Decision`, `review.ApplyResult` | the full audit trail behind every correction — who/when belongs to the main app, but the domain content belongs here |
 | Normalized financial dataset | `financial.FinancialDataset` | the dataset every downstream figure was computed from |

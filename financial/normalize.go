@@ -12,6 +12,24 @@ import (
 // are in.
 var ErrMissingCurrency = errors.New("financial: currency is required")
 
+// ValidationErrorCode is a stable identifier for one kind of Normalize
+// validation problem, in the same spirit as valuation.IssueCode and
+// adjustments.IssueCode: a caller should branch on Code, never on Reason's
+// free-text message, which may be reworded over time.
+type ValidationErrorCode string
+
+const (
+	// ErrCodeUnrecognizedStatus means a MappedLineItem's Status is set to a
+	// value other than RowStatusNormal, RowStatusIgnored, RowStatusSubtotal,
+	// or RowStatusTotal (the empty string defaults to RowStatusNormal and is
+	// not an error).
+	ErrCodeUnrecognizedStatus ValidationErrorCode = "UNRECOGNIZED_STATUS"
+	// ErrCodeMissingCode means a MappedLineItem with RowStatusNormal (the
+	// default) has no canonical Code, which Normalize requires in order to
+	// aggregate the item into a FinancialDataset.
+	ErrCodeMissingCode ValidationErrorCode = "MISSING_CODE"
+)
+
 // ValidationError describes a problem with a single input row that prevented
 // normalization from proceeding. Normalize collects every problem it finds
 // and returns them together, rather than failing on the first one, so
@@ -19,12 +37,17 @@ var ErrMissingCurrency = errors.New("financial: currency is required")
 type ValidationError struct {
 	// SourceID identifies the offending MappedLineItem (its SourceID
 	// field), if available.
-	SourceID string
+	SourceID string `json:"source_id,omitempty"`
 	// Index is the position of the offending item in the input slice,
 	// included even when SourceID is empty.
-	Index int
-	// Reason describes what was wrong.
-	Reason string
+	Index int `json:"index"`
+	// Code is the stable, machine-readable identifier for this problem. A
+	// caller should branch on Code, never parse Reason. See
+	// ValidationErrorCode.
+	Code ValidationErrorCode `json:"code"`
+	// Reason describes what was wrong, for humans. Not stable across
+	// versions; do not match against it in code.
+	Reason string `json:"reason"`
 }
 
 func (e *ValidationError) Error() string {
@@ -115,6 +138,7 @@ func Normalize(items []MappedLineItem, opts NormalizeOptions) (FinancialDataset,
 			problems = append(problems, &ValidationError{
 				SourceID: item.SourceID,
 				Index:    i,
+				Code:     ErrCodeUnrecognizedStatus,
 				Reason:   fmt.Sprintf("unrecognized status %q", status),
 			})
 			continue
@@ -124,6 +148,7 @@ func Normalize(items []MappedLineItem, opts NormalizeOptions) (FinancialDataset,
 			problems = append(problems, &ValidationError{
 				SourceID: item.SourceID,
 				Index:    i,
+				Code:     ErrCodeMissingCode,
 				Reason:   "missing canonical code for non-ignored, non-subtotal, non-total row",
 			})
 			continue

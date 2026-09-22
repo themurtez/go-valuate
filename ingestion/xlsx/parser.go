@@ -171,6 +171,7 @@ func Parse(r io.Reader, opts ingestion.Options) (*ingestion.Result, *ingestion.E
 				}
 			}
 			return &ingestion.Result{
+				SchemaVersion: ingestion.SchemaVersion,
 				Metadata: ingestion.Metadata{
 					Format:     ingestion.FormatXLSX,
 					Sheets:     sheetInfos,

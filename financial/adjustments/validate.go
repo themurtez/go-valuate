@@ -165,6 +165,10 @@ func baseMetricAvailable(snapshot metrics.Snapshot, target Target) (label string
 }
 
 // HasErrors reports whether any Issue in issues has SeverityError.
+//
+// Intentionally duplicated in valuation (HasErrors over valuation.Issue)
+// and review (HasErrors over review.Issue) rather than shared — see
+// valuation.HasErrors's doc comment for the full rationale.
 func HasErrors(issues []Issue) bool {
 	for _, i := range issues {
 		if i.Severity == SeverityError {

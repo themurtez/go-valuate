@@ -1,6 +1,7 @@
 package financial
 
 import (
+	"encoding/json"
 	"errors"
 	"testing"
 )
@@ -239,6 +240,9 @@ func TestNormalize_MissingCodeOnNormalRowIsValidationError(t *testing.T) {
 	if verrs[0].SourceID != "row-1" {
 		t.Errorf("SourceID = %q, want row-1", verrs[0].SourceID)
 	}
+	if verrs[0].Code != ErrCodeMissingCode {
+		t.Errorf("Code = %q, want %q", verrs[0].Code, ErrCodeMissingCode)
+	}
 }
 
 func TestNormalize_UnrecognizedStatusIsValidationError(t *testing.T) {
@@ -253,6 +257,96 @@ func TestNormalize_UnrecognizedStatusIsValidationError(t *testing.T) {
 	}
 	if len(verrs) != 1 {
 		t.Fatalf("expected 1 validation error, got %d", len(verrs))
+	}
+	if verrs[0].Code != ErrCodeUnrecognizedStatus {
+		t.Errorf("Code = %q, want %q", verrs[0].Code, ErrCodeUnrecognizedStatus)
+	}
+}
+
+func TestNormalize_ValidationErrorCodesAreStableNotMessageDependent(t *testing.T) {
+	// A caller must be able to branch on Code alone; Reason is free text
+	// and may change wording without notice.
+	missingCode := []MappedLineItem{
+		{SourceID: "row-1", Values: map[Period]float64{"2025": 100}},
+	}
+	_, err := Normalize(missingCode, NormalizeOptions{Currency: "USD"})
+	var verrs ValidationErrors
+	if !errors.As(err, &verrs) {
+		t.Fatalf("err = %v, want ValidationErrors", err)
+	}
+	if verrs[0].Code != ErrCodeMissingCode {
+		t.Errorf("Code = %q, want %q", verrs[0].Code, ErrCodeMissingCode)
+	}
+
+	badStatus := []MappedLineItem{
+		{SourceID: "row-2", Code: CodeRevProduct, Status: "bogus", Values: map[Period]float64{"2025": 100}},
+	}
+	_, err = Normalize(badStatus, NormalizeOptions{Currency: "USD"})
+	if !errors.As(err, &verrs) {
+		t.Fatalf("err = %v, want ValidationErrors", err)
+	}
+	if verrs[0].Code != ErrCodeUnrecognizedStatus {
+		t.Errorf("Code = %q, want %q", verrs[0].Code, ErrCodeUnrecognizedStatus)
+	}
+	if verrs[0].Code == ErrCodeMissingCode {
+		t.Error("distinct validation problems must not share a Code")
+	}
+}
+
+func TestValidationError_JSONRoundTrip(t *testing.T) {
+	original := &ValidationError{
+		SourceID: "row-1",
+		Index:    3,
+		Code:     ErrCodeMissingCode,
+		Reason:   "missing canonical code for non-ignored, non-subtotal, non-total row",
+	}
+
+	data, err := json.Marshal(original)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+
+	var decoded ValidationError
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if decoded != *original {
+		t.Errorf("round-tripped ValidationError = %+v, want %+v", decoded, *original)
+	}
+
+	// Code must serialize as its stable string value, not an opaque
+	// wrapper, so a non-Go consumer of a persisted result can match on it.
+	var raw map[string]any
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatalf("Unmarshal to map: %v", err)
+	}
+	if raw["code"] != "MISSING_CODE" {
+		t.Errorf("code field = %v, want MISSING_CODE", raw["code"])
+	}
+}
+
+func TestValidationErrors_JSONRoundTrip(t *testing.T) {
+	original := ValidationErrors{
+		{SourceID: "row-1", Index: 0, Code: ErrCodeMissingCode, Reason: "missing code"},
+		{SourceID: "row-2", Index: 1, Code: ErrCodeUnrecognizedStatus, Reason: "bad status"},
+	}
+
+	data, err := json.Marshal(original)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+
+	var decoded ValidationErrors
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if len(decoded) != len(original) {
+		t.Fatalf("decoded length = %d, want %d", len(decoded), len(original))
+	}
+	for i := range original {
+		if *decoded[i] != *original[i] {
+			t.Errorf("decoded[%d] = %+v, want %+v", i, *decoded[i], *original[i])
+		}
 	}
 }
 

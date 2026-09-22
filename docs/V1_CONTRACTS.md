@@ -640,20 +640,20 @@ about structs, and every struct here is safe).
 
 ## Error and issue contracts
 
-This module deliberately maintains **eight independent structured issue/
+This module deliberately maintains **nine independent structured issue/
 error systems** rather than one shared type — confirmed intentional via
 each package's own doc comment (four of them explicitly state the same
 reasoning: forcing one package's Issue type to also serve an unrelated
 problem domain would either leak that domain's codes into an unrelated
 package or create an import coupling that shouldn't exist). This section
 is the caller-facing index; see the README's
-[Error taxonomy](../README.md#error-taxonomy) for the five systems already
+[Error taxonomy](../README.md#error-taxonomy) for the six systems already
 documented there.
 
 | System | Package | Emitted by | Fatal/non-fatal | Stable code field |
 |---|---|---|---|---|
 | `ingestion.Error` / `ingestion.Warning` | `ingestion` | `ingestion`, `ingestion/csv`, `ingestion/xlsx`, `ingestion/pdf` | **Separate types**: `Error` always fatal (no `Result` produced), `Warning` always non-fatal (`Result` still valid) | `Error.Code ErrorCode`, `Warning.Code WarningCode` |
-| `financial.ValidationError`/`ValidationErrors` | `financial` | `financial.Normalize` only | Fatal only — no warning concept in this package; a real Go `error` via `errors.As` | **None** — see gap below |
+| `financial.ValidationError`/`ValidationErrors` | `financial` | `financial.Normalize` only | Fatal only — no warning concept in this package; a real Go `error` via `errors.As` | `ValidationError.Code ValidationErrorCode` (2 constants: `UNRECOGNIZED_STATUS`, `MISSING_CODE`) |
 | `review.Issue`/`IssueCode`/`IssueSeverity` | `review` | `review.Apply` | Same type, `Severity` field (`Error` rejects the decision into `ApplyResult.Invalid`; `Warning` is advisory) | `Issue.Code IssueCode` (12 constants) |
 | `adjustments.Issue`/`IssueCode`/`IssueSeverity` | `financial/adjustments` | `adjustments.Validate`/`Apply` | Same type, `Severity` field (`Error` skips the adjustment; `Warning` is advisory) | `Issue.Code IssueCode` (12 constants) |
 | `financial/reconciliation`'s `Check`/`Status`/`CheckCode` | `financial/reconciliation` | `reconciliation.Run` | **Four-valued `Status`** (`PASS`/`WARNING`/`FAIL`/`NOT_APPLICABLE`), not fatal/non-fatal at all — `Run` never returns a Go error; whether a `FAIL` blocks anything is entirely a caller policy decision (`review.Policy.ReconciliationFailureBlocks` is the opt-in escalation lever) | `Check.Code CheckCode` (16 constants) |
@@ -665,21 +665,13 @@ documented there.
 **`classification` itself has no dedicated Issue type** — it signals
 "needs review" via `Result.ReviewRequired`/`Result.IsUnknown()` directly on
 the result, pushing structured issue construction one layer up into
-`review.Build`'s `KindClassification` item logic. This is a ninth relevant
-data point, not a ninth system.
+`review.Build`'s `KindClassification` item logic. This is a relevant data
+point, not a tenth system.
 
-**Two gaps found, both real, both narrow:**
+**One gap remains, real but narrow (a second was closed in Prompt 14A —
+see below):**
 
-1. **`financial.ValidationError`/`ValidationErrors` has no stable `Code`
-   field** — the one system in this survey without one. A caller
-   distinguishing "missing code" from "unrecognized status" must
-   string-match the freeform `Reason` field. Every other system audited has
-   a stable code. Not fixed in this pass (adding a code taxonomy to an
-   existing public error type is exactly the kind of API-surface change
-   this task's freeze scope asks to be conservative about); flagged here so
-   a caller building string-matching logic against `Reason` knows it is
-   working around a real gap, not a documentation oversight.
-2. **`valuation/orchestrator.MethodWarning`** flattens a method's
+1. **`valuation/orchestrator.MethodWarning`** flattens a method's
    `valuation.Issue{Code, Severity, Message}` down to `{Method, Message
    string}` when building `Run.Warnings` — the one place in the whole
    pipeline where `Code`/`Severity` are deliberately dropped rather than
@@ -688,8 +680,20 @@ data point, not a ninth system.
    directly (still fully populated) rather than off the orchestrator's
    flattened summary.
 
+**Closed in Prompt 14A:** `financial.ValidationError` previously had no
+stable `Code` field — the one system in the Prompt 14 survey without one,
+requiring a caller to string-match the freeform `Reason` field to
+distinguish "missing code" from "unrecognized status." It now carries
+`Code ValidationErrorCode` (`ErrCodeUnrecognizedStatus` /
+`ErrCodeMissingCode`), populated on every emitted `*ValidationError`, with
+JSON tags added to the whole type (`source_id`, `index`, `code`, `reason`)
+since it previously had none. Existing callers checking via `errors.As` are
+unaffected; only additive fields changed. A caller must branch on `Code`,
+never parse `Reason` — see the README's
+[Error taxonomy](../README.md#error-taxonomy).
+
 **Which errors are end-user-safe to show directly vs. developer-facing
-diagnostics is undocumented at the field level across all eight systems**,
+diagnostics is undocumented at the field level across all nine systems**,
 with exactly one exception:
 `financial/reconciliation.Check.Explanation` explicitly states "suitable
 for display to a reviewer." Every other system's `Message`/`Reason` field
@@ -708,23 +712,33 @@ uniformly asserted by any package's doc comment.
 
 The README's [Versioning strategy](../README.md#versioning-strategy) table
 is the authoritative, complete inventory of every version constant that
-exists — 19 constants total, every one confirmed to actually be echoed
+exists — 20 constants total, every one confirmed to actually be echoed
 onto its corresponding output type (`Result`/`Plan`/`Provenance` field),
 not decorative. Cross-verified directly against source (file:line for
 every one) — the table is accurate as written.
 
-**Packages with no version constant, despite having fixed
-rules/formulas/taxonomies that could reasonably change:**
+**Closed in Prompt 14A:** `ingestion` (and its `csv`/`xlsx`/`pdf`
+subpackages) previously had no version constant at all, despite
+`ingestion.Result` being a JSON-serializable, pipeline-critical output type
+whose own structural-detection rules (statement-type detection, period
+parsing, numeric-format rules, `ClassifyRowKind` heuristics) are exactly the
+kind of thing the README's own versioning criterion describes. It now has
+`ingestion.SchemaVersion`, echoed on `ingestion.Result.SchemaVersion` and
+populated by every format via the shared `BuildResult` entry point (all
+three formats funnel through it; the one bypass path — `xlsx.Parse`'s
+early return on ambiguous sheet selection — was patched to set it directly).
+One version constant, not one per subpackage, since `csv`/`xlsx`/`pdf` all
+produce the exact same `Result` contract shape rather than independent
+ones. (`OCRProvenance.EngineVersion` remains a *runtime-reported* string
+from the Tesseract binary itself, a categorically different thing that
+happens to share the word "Version" — not a contract version, and
+unaffected by this change.)
 
-- **`ingestion`** (and its `csv`/`xlsx`/`pdf` subpackages) — no version
-  constant at all, despite `ingestion.Result` being a JSON-serializable,
-  pipeline-critical output type whose own structural-detection rules
-  (statement-type detection, period parsing, numeric-format rules,
-  `ClassifyRowKind` heuristics) are exactly the kind of thing the README's
-  own versioning criterion describes. (`OCRProvenance.EngineVersion` is a
-  *runtime-reported* string from the Tesseract binary itself, a
-  categorically different thing that happens to share the word "Version"
-  — not a contract version.)
+**Packages that still have no version constant, despite having fixed
+rules/formulas/taxonomies that could reasonably change (out of scope for
+Prompt 14A — see that task's "do not add unnecessary new versions"
+instruction):**
+
 - **`financial/reconciliation`** — no version constant despite its own
   fixed `CheckCode` taxonomy and tolerance rules.
 - **`valuation`** (the shared envelope package) — no version constant for

@@ -203,7 +203,8 @@ func BuildResult(in BuildInput) (Result, []Warning) {
 	}
 
 	result := Result{
-		Rows: rows,
+		SchemaVersion: SchemaVersion,
+		Rows:          rows,
 		Metadata: Metadata{
 			Format:                in.Format,
 			SelectedSheetIndex:    in.SheetIndex,

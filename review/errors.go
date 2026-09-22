@@ -102,6 +102,10 @@ type Issue struct {
 
 // HasErrors reports whether any Issue in issues has SeverityIssueError,
 // mirroring adjustments.HasErrors.
+//
+// Intentionally duplicated rather than shared with valuation.HasErrors and
+// adjustments.HasErrors — see valuation.HasErrors's doc comment for the
+// full rationale.
 func HasErrors(issues []Issue) bool {
 	for _, i := range issues {
 		if i.Severity == SeverityIssueError {
