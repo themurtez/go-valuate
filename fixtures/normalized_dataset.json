@@ -1,0 +1,55 @@
+{
+  "currency": "USD",
+  "items": [
+    {
+      "code": "OPEX_MARKETING",
+      "period": "2024",
+      "amount": 35000,
+      "sources": [
+        { "row_id": "row-40", "label": "Online Ads", "period": "2024", "amount": 20000 },
+        { "row_id": "row-42", "label": "Advertising & Promotion", "period": "2024", "amount": 15000 }
+      ]
+    },
+    {
+      "code": "OPEX_MARKETING",
+      "period": "2025",
+      "amount": 42000,
+      "sources": [
+        { "row_id": "row-40", "label": "Online Ads", "period": "2025", "amount": 25000 },
+        { "row_id": "row-42", "label": "Advertising & Promotion", "period": "2025", "amount": 17000 }
+      ]
+    },
+    {
+      "code": "REV_PRODUCT",
+      "period": "2024",
+      "amount": 500000,
+      "sources": [
+        { "row_id": "row-1", "label": "Product Sales", "period": "2024", "amount": 500000 }
+      ]
+    },
+    {
+      "code": "REV_PRODUCT",
+      "period": "2025",
+      "amount": 560000,
+      "sources": [
+        { "row_id": "row-1", "label": "Product Sales", "period": "2025", "amount": 560000 }
+      ]
+    },
+    {
+      "code": "REV_SERVICE",
+      "period": "2024",
+      "amount": 120000,
+      "sources": [
+        { "row_id": "row-2", "label": "Service Revenue", "period": "2024", "amount": 120000 }
+      ]
+    },
+    {
+      "code": "REV_SERVICE",
+      "period": "2025",
+      "amount": 135000,
+      "sources": [
+        { "row_id": "row-2", "label": "Service Revenue", "period": "2025", "amount": 135000 }
+      ]
+    }
+  ]
+}

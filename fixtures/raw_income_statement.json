@@ -1,0 +1,61 @@
+[
+  {
+    "id": "row-1",
+    "statement_type": "income_statement",
+    "label": "Product Sales",
+    "parent_label": "Revenue",
+    "values": {
+      "2024": 500000,
+      "2025": 560000
+    }
+  },
+  {
+    "id": "row-2",
+    "statement_type": "income_statement",
+    "label": "Service Revenue",
+    "parent_label": "Revenue",
+    "values": {
+      "2024": 120000,
+      "2025": 135000
+    }
+  },
+  {
+    "id": "row-3",
+    "statement_type": "income_statement",
+    "label": "Total Revenue",
+    "values": {
+      "2024": 620000,
+      "2025": 695000
+    }
+  },
+  {
+    "id": "row-40",
+    "statement_type": "income_statement",
+    "label": "Online Ads",
+    "parent_label": "Operating Expenses",
+    "values": {
+      "2024": 20000,
+      "2025": 25000
+    }
+  },
+  {
+    "id": "row-42",
+    "statement_type": "income_statement",
+    "label": "Advertising & Promotion",
+    "parent_label": "Operating Expenses",
+    "values": {
+      "2024": 15000,
+      "2025": 17000
+    }
+  },
+  {
+    "id": "row-50",
+    "statement_type": "income_statement",
+    "label": "Total Operating Expenses",
+    "parent_label": "Operating Expenses",
+    "values": {
+      "2024": 35000,
+      "2025": 42000
+    }
+  }
+]

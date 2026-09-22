@@ -1,0 +1,38 @@
+{
+  "_comment": "Example Resolve() inputs/output. sde_multiple: only valuation sets it, wins. discount_rate: client overrides account and system. tax_rate: only account sets it, wins (no client/valuation override). control_premium: explicit zero at valuation scope, distinct from unset.",
+  "system": {
+    "scope": "system",
+    "sde_multiple": null,
+    "discount_rate": 0.12,
+    "tax_rate": null,
+    "control_premium": null
+  },
+  "account": {
+    "scope": "account",
+    "discount_rate": 0.13,
+    "tax_rate": 0.21
+  },
+  "client": {
+    "scope": "client",
+    "discount_rate": 0.15
+  },
+  "valuation": {
+    "scope": "valuation",
+    "sde_multiple": 2.75,
+    "control_premium": 0.0
+  },
+  "expected_resolution": {
+    "values": {
+      "sde_multiple": 2.75,
+      "discount_rate": 0.15,
+      "tax_rate": 0.21,
+      "control_premium": 0.0
+    },
+    "sources": {
+      "sde_multiple": "valuation",
+      "discount_rate": "client",
+      "tax_rate": "account",
+      "control_premium": "valuation"
+    }
+  }
+}

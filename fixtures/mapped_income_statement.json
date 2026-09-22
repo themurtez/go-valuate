@@ -1,0 +1,66 @@
+[
+  {
+    "source_id": "row-1",
+    "label": "Product Sales",
+    "statement_type": "income_statement",
+    "code": "REV_PRODUCT",
+    "status": "normal",
+    "values": {
+      "2024": 500000,
+      "2025": 560000
+    }
+  },
+  {
+    "source_id": "row-2",
+    "label": "Service Revenue",
+    "statement_type": "income_statement",
+    "code": "REV_SERVICE",
+    "status": "normal",
+    "values": {
+      "2024": 120000,
+      "2025": 135000
+    }
+  },
+  {
+    "source_id": "row-3",
+    "label": "Total Revenue",
+    "statement_type": "income_statement",
+    "status": "total",
+    "values": {
+      "2024": 620000,
+      "2025": 695000
+    }
+  },
+  {
+    "source_id": "row-40",
+    "label": "Online Ads",
+    "statement_type": "income_statement",
+    "code": "OPEX_MARKETING",
+    "status": "normal",
+    "values": {
+      "2024": 20000,
+      "2025": 25000
+    }
+  },
+  {
+    "source_id": "row-42",
+    "label": "Advertising & Promotion",
+    "statement_type": "income_statement",
+    "code": "OPEX_MARKETING",
+    "status": "normal",
+    "values": {
+      "2024": 15000,
+      "2025": 17000
+    }
+  },
+  {
+    "source_id": "row-50",
+    "label": "Total Operating Expenses",
+    "statement_type": "income_statement",
+    "status": "subtotal",
+    "values": {
+      "2024": 35000,
+      "2025": 42000
+    }
+  }
+]

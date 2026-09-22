@@ -1,0 +1,57 @@
+{
+  "_comment": "Realistic raw line items across four business archetypes, used by financial/classification tests. Labels are intentionally messy/realistic (leading account numbers, ampersands, abbreviations). Not every row is expected to classify automatically — some are deliberately ambiguous and should remain UNKNOWN; see classification/fixtures_test.go for the expected outcome of each row.",
+
+  "hvac_service_business": [
+    { "id": "hvac-1", "statement_type": "income_statement", "label": "6100 - Advertising & Promotion", "parent_label": "Operating Expenses", "values": { "2025": 18000 } },
+    { "id": "hvac-2", "statement_type": "income_statement", "label": "Truck & Auto", "parent_label": "Operating Expenses", "values": { "2025": 22000 } },
+    { "id": "hvac-3", "statement_type": "income_statement", "label": "Owner Wages", "parent_label": "Operating Expenses", "values": { "2025": 90000 } },
+    { "id": "hvac-4", "statement_type": "income_statement", "label": "Merchant Processing Fees", "parent_label": "Operating Expenses", "values": { "2025": 6200 } },
+    { "id": "hvac-5", "statement_type": "income_statement", "label": "Field Labor", "parent_label": "Cost of Sales", "values": { "2025": 210000 } },
+    { "id": "hvac-6", "statement_type": "income_statement", "label": "Shop Supplies", "parent_label": "Operating Expenses", "values": { "2025": 4300 } },
+    { "id": "hvac-7", "statement_type": "income_statement", "label": "Subcontract Installers", "parent_label": "Cost of Sales", "values": { "2025": 65000 } },
+    { "id": "hvac-8", "statement_type": "income_statement", "label": "Repairs & Maintenance", "parent_label": "Operating Expenses", "values": { "2025": 5100 } },
+    { "id": "hvac-9", "statement_type": "income_statement", "label": "Equipment Rental", "parent_label": "Operating Expenses", "values": { "2025": 3800 } },
+    { "id": "hvac-10", "statement_type": "income_statement", "label": "Total Cost of Sales", "parent_label": "Cost of Sales", "values": { "2025": 275000 } },
+    { "id": "hvac-11", "statement_type": "income_statement", "label": "Total Operating Expenses", "parent_label": "Operating Expenses", "values": { "2025": 149400 } }
+  ],
+
+  "agency_professional_services": [
+    { "id": "agency-1", "statement_type": "income_statement", "label": "Software Subscriptions", "parent_label": "Operating Expenses", "values": { "2025": 14200 } },
+    { "id": "agency-2", "statement_type": "income_statement", "label": "Professional Services", "parent_label": "Operating Expenses", "values": { "2025": 27500 } },
+    { "id": "agency-3", "statement_type": "income_statement", "label": "Officer Compensation", "parent_label": "Operating Expenses", "values": { "2025": 165000 } },
+    { "id": "agency-4", "statement_type": "income_statement", "label": "Google Ads", "parent_label": "Operating Expenses", "values": { "2025": 32000 } },
+    { "id": "agency-5", "statement_type": "income_statement", "label": "Payroll - Salaried Staff", "parent_label": "Operating Expenses", "values": { "2025": 410000 } },
+    { "id": "agency-6", "statement_type": "income_statement", "label": "Travel", "parent_label": "Operating Expenses", "values": { "2025": 9800 } },
+    { "id": "agency-7", "statement_type": "income_statement", "label": "Office Rent", "parent_label": "Operating Expenses", "values": { "2025": 48000 } },
+    { "id": "agency-8", "statement_type": "income_statement", "label": "Bank Charges", "parent_label": "Operating Expenses", "values": { "2025": 1100 } },
+    { "id": "agency-9", "statement_type": "income_statement", "label": "Misc", "parent_label": "Operating Expenses", "values": { "2025": 2200 } },
+    { "id": "agency-10", "statement_type": "income_statement", "label": "Total Operating Expenses", "parent_label": "Operating Expenses", "values": { "2025": 709800 } }
+  ],
+
+  "manufacturer": [
+    { "id": "mfg-1", "statement_type": "income_statement", "label": "7000 Freight In", "parent_label": "Cost of Goods Sold", "values": { "2025": 38000 } },
+    { "id": "mfg-2", "statement_type": "income_statement", "label": "Freight Out", "parent_label": "Operating Expenses", "values": { "2025": 21000 } },
+    { "id": "mfg-3", "statement_type": "income_statement", "label": "Direct Materials", "parent_label": "Cost of Goods Sold", "values": { "2025": 540000 } },
+    { "id": "mfg-4", "statement_type": "income_statement", "label": "Production Labor", "parent_label": "Cost of Goods Sold", "values": { "2025": 310000 } },
+    { "id": "mfg-5", "statement_type": "income_statement", "label": "Depreciation Expense", "parent_label": "Operating Expenses", "values": { "2025": 47000 } },
+    { "id": "mfg-6", "statement_type": "income_statement", "label": "Interest Expense", "parent_label": "Other Expenses", "values": { "2025": 15500 } },
+    { "id": "mfg-7", "statement_type": "income_statement", "label": "Equipment Repairs & Maintenance", "parent_label": "Operating Expenses", "values": { "2025": 12300 } },
+    { "id": "mfg-8", "statement_type": "income_statement", "label": "General", "parent_label": "Operating Expenses", "values": { "2025": 3400 } },
+    { "id": "mfg-9", "statement_type": "balance_sheet", "label": "Accounts Receivable", "values": { "2025": 88000 } },
+    { "id": "mfg-10", "statement_type": "balance_sheet", "label": "Inventory", "values": { "2025": 152000 } },
+    { "id": "mfg-11", "statement_type": "income_statement", "label": "Total Cost of Goods Sold", "parent_label": "Cost of Goods Sold", "values": { "2025": 888000 } }
+  ],
+
+  "growth_software_company": [
+    { "id": "saas-1", "statement_type": "income_statement", "label": "Software Subscriptions", "parent_label": "Operating Expenses", "values": { "2025": 96000 } },
+    { "id": "saas-2", "statement_type": "income_statement", "label": "Payroll", "parent_label": "Operating Expenses", "values": { "2025": 1250000 } },
+    { "id": "saas-3", "statement_type": "income_statement", "label": "Marketing Expense", "parent_label": "Operating Expenses", "values": { "2025": 210000 } },
+    { "id": "saas-4", "statement_type": "income_statement", "label": "Professional Fees - Legal & Accounting", "parent_label": "Operating Expenses", "values": { "2025": 41000 } },
+    { "id": "saas-5", "statement_type": "income_statement", "label": "Amortization of Capitalized Software", "parent_label": "Operating Expenses", "values": { "2025": 34000 } },
+    { "id": "saas-6", "statement_type": "income_statement", "label": "Interest Income", "parent_label": "Other Income", "values": { "2025": 8600 } },
+    { "id": "saas-7", "statement_type": "income_statement", "label": "Office Supplies", "parent_label": "Operating Expenses", "values": { "2025": 5200 } },
+    { "id": "saas-8", "statement_type": "income_statement", "label": "Adjustment", "parent_label": "Operating Expenses", "values": { "2025": -1800 } },
+    { "id": "saas-9", "statement_type": "income_statement", "label": "Other", "parent_label": "Operating Expenses", "values": { "2025": 900 } },
+    { "id": "saas-10", "statement_type": "income_statement", "label": "Net Income", "values": { "2025": -1200000 } }
+  ]
+}
