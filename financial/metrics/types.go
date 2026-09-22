@@ -38,7 +38,7 @@ type MetricValue struct {
 // for readability at call sites.
 func Unavailable() MetricValue { return MetricValue{} }
 
-// Available reports a MetricValue for a successfully computed figure.
+// AvailableValue reports a MetricValue for a successfully computed figure.
 func AvailableValue(v float64) MetricValue { return MetricValue{Available: true, Value: v} }
 
 // Component is one named input that contributed to a computed metric,

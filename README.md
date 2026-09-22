@@ -16,6 +16,40 @@ moved into a bigger Go application once they've proven out. Until then it
 stays self-contained on purpose: no database, no HTTP, no auth, nothing
 tying it to a particular product's infrastructure.
 
+**The standalone V1 domain library is integration-ready.** Every pipeline
+stage described below — ingestion, classification, review, normalization,
+reconciliation, metrics, adjustments, maintainable earnings, valuation
+methods, applicability, orchestration, consensus, sensitivity, report
+model, settings resolution, and both optional AI capabilities — is
+contract-frozen for V1: public/internal/experimental API boundaries are
+audited, data-ownership and zero-value behavior are documented and tested,
+every major result type round-trips through JSON, and a canonical
+end-to-end test
+([`review/e2e_v1_contract_test.go`](review/e2e_v1_contract_test.go))
+exercises the complete chain from raw document bytes to a serialized
+report using only deterministic/fake dependencies. See:
+
+- [`docs/V1_CONTRACTS.md`](docs/V1_CONTRACTS.md) — the primary data
+  contracts a main application integrates with, and which parts of the
+  public API are frozen vs. still evolvable.
+- [`docs/INTEGRATION.md`](docs/INTEGRATION.md) — the recommended
+  orchestration flow, security/privacy boundaries, and persistence
+  snapshot guidance.
+- [`docs/DEPENDENCIES.md`](docs/DEPENDENCIES.md) — every direct
+  dependency and external runtime tool, with license/purpose/isolation
+  boundary.
+- [`docs/FIXTURES.md`](docs/FIXTURES.md) — the synthetic test-fixture
+  catalog, so future test-writing reuses existing fixtures instead of
+  inventing new ones.
+- [`examples/full_flow`](examples/full_flow) — a runnable, narrated
+  program demonstrating the complete flow end to end.
+
+This is **not** a certified appraisal or compliance product — it is a
+deterministic calculation core an application can build a real valuation
+workflow on top of; see
+[`docs/INTEGRATION.md` § Known limitations](docs/INTEGRATION.md#known-limitations)
+for the consolidated list of what remains out of scope.
+
 ## Architecture
 
 Every stage below is a pure function of the previous stage's output — no
@@ -240,6 +274,8 @@ go-valuate/
   review/                    review Plan/Decisions/Apply/Readiness domain layer (see `review` below)
   fixtures/                  example JSON matching the Go types, used by tests
                              as living documentation
+  docs/                      V1 contracts/integration/dependency/fixture-catalog docs (see below)
+  examples/full_flow/         runnable, narrated demonstration of the complete V1 flow
 ```
 
 ### `ingestion`
@@ -3165,7 +3201,10 @@ persist historical valuations").
 | Review schema | `review.SchemaVersion`, echoed on `review.Plan.Version` | `ReviewItem`/`Plan`/`Decision`/`ApplyResult` shapes and the deterministic ID/severity/readiness rules that produce them (`review`) |
 | AI request/response schema | `ai.RequestSchemaVersion`, echoed on `ai.Provenance.RequestSchemaVersion` | The `Request`/`Response` wire shape `financial/classification/ai` sends to/expects from a `Classifier` |
 | AI fallback orchestration | `ai.OrchestrationVersion`, echoed on `ai.Provenance.OrchestrationVersion` | The trigger/fallback/safety decision logic in `ClassifyWithFallback`/`ClassifyBatchWithFallback` (which `FallbackMode` runs AI when, structural-row skipping, disagreement handling) |
-| OpenAI adapter | `openai.AdapterVersion`, echoed on `ai.Provenance.AdapterVersion` | This specific provider adapter's prompt-construction/response-parsing logic (`financial/classification/ai/openai`) |
+| OpenAI adapter (classification) | `openai.AdapterVersion`, echoed on `ai.Provenance.AdapterVersion` | This specific provider adapter's prompt-construction/response-parsing logic (`financial/classification/ai/openai`) |
+| AI adjustment-suggestion request/response schema | `ai.RequestSchemaVersion`, echoed on `ai.Provenance.RequestSchemaVersion` | The `Request`/`Response` wire shape `financial/adjustments/ai` sends to/expects from a `Suggester` — a distinct constant/package from classification's identically-named one |
+| AI adjustment-suggestion orchestration | `ai.OrchestrationVersion`, echoed on `ai.Provenance.OrchestrationVersion` | The batching/validation/provenance decision logic in `SuggestAdjustments`/`SuggestAdjustmentsBatch` (`financial/adjustments/ai`) — a distinct constant/package from classification's identically-named one |
+| OpenAI adapter (adjustment suggestions) | `openai.AdapterVersion`, echoed on `ai.Provenance.AdapterVersion` | This specific provider adapter's prompt-construction/response-parsing logic (`financial/adjustments/ai/openai`) |
 
 **The rule for bumping a version:** whenever a formula, an availability/
 validation rule, a default, a sign convention, or an output shape changes
@@ -3198,7 +3237,8 @@ unverified incidental property of the standard library).
 | `valuation/consensus.Result.Requested` / `Included` / `Conversions` | `Requested` preserves caller order exactly; `Included` and `Conversions` preserve that same order (with excluded entries removed from `Included` only) |
 | `valuation/report.Report.Methods` | Same fixed method order (`methodOrder`, mirroring the orchestrator's) |
 | `review.Plan.Items` | Primarily by `Severity` (`BLOCKING`, `ERROR`, `WARNING`, `INFO`), then by `Kind` (string order), then by `SourceRowID`, then by `ID` — a real `sort.SliceStable` over exactly these keys (`review`'s `sortItems`), never left to `Build`'s internal append order |
-| `ai.BatchOutcome.Outcomes` | Input order preserved exactly: `Outcomes[i]` always corresponds to the `i`-th row passed to `ClassifyBatchWithFallback` |
+| `ai.BatchOutcome.Outcomes` (`financial/classification/ai`) | Input order preserved exactly: `Outcomes[i]` always corresponds to the `i`-th row passed to `ClassifyBatchWithFallback` |
+| `ai.BatchOutcome.Outcomes` (`financial/adjustments/ai`) | Input order preserved exactly: `Outcomes[i]` always corresponds to the `i`-th `Request` passed to `SuggestAdjustmentsBatch` |
 
 ## Error taxonomy
 
@@ -3253,6 +3293,19 @@ message strings:
   validity problem, and this package must remain importable/testable
   without ever pulling in `review`/`valuation`/`adjustments`' own error
   vocabularies (or vice versa).
+- **`ai.Issue{SourceRowID, Code ai.IssueCode, Severity, Message}`** —
+  `financial/adjustments/ai`'s own separate system (a distinct Go type from
+  classification's identically-named `ai.Issue`, in a different package):
+  `AI_PROVIDER_UNAVAILABLE`, `AI_TIMEOUT`, `AI_PROVIDER_ERROR`,
+  `AI_RATE_LIMITED`, `AI_MALFORMED_RESPONSE`, `UNKNOWN_SOURCE_ROW`,
+  `WRONG_PERIOD`, `INVENTED_AMOUNT`, `INVALID_ADJUSTMENT_TYPE`,
+  `INCOMPATIBLE_DIRECTION`, `STRUCTURAL_SOURCE_ROW`,
+  `AMBIGUOUS_SOURCE_AMOUNT`, `DUPLICATE_SUGGESTION`, `NON_FINITE_AMOUNT`,
+  `REQUIRES_USER_INPUT` — a fifth system: source-bound adjustment-suggestion
+  validation (is this suggestion tied to a real row at a real amount?) is a
+  different problem domain from classification-fallback validation (is
+  this code in the closed set?), even though both packages sit under the
+  same "optional AI capability" umbrella.
 
 Two structured-but-not-error-severity vocabularies exist alongside these
 and are not folded in, since they already serve the "stable, matchable"
@@ -3571,14 +3624,36 @@ candidate for a future module or application layer built on top of the
 types and packages already defined here, but none should be started as
 part of this repository's own scope.
 
-One exception has since been added: **optional, human-reviewed AI
-classification fallback** (see [AI fallback classification](#ai-fallback-classification)
-below) — strictly behind a provider-neutral interface, closed-set,
-mandatory-review, never a replacement for the deterministic pipeline. Every
-OTHER form of AI/LLM assistance (document understanding, OCR correction,
-add-back recommendations, valuation method/multiple selection, DCF
+Two exceptions have since been added, both strictly behind provider-neutral
+interfaces, closed-set, mandatory-review, and never a replacement for their
+respective deterministic pipeline: **optional, human-reviewed AI
+classification fallback** (see [AI fallback classification](#ai-fallback-classification))
+and **optional, human-reviewed AI adjustment/add-back suggestions** (see
+[AI adjustment suggestions](#ai-adjustment-suggestions)). Every OTHER form
+of AI/LLM assistance (document understanding, OCR correction, AI-invented
+replacement salaries/market rents, valuation method/multiple selection, DCF
 forecasting, report narrative generation) remains explicitly out of scope —
-see that section's own "Explicit non-goals" for the full list.
+see each section's own "Explicit non-goals" for the full list.
+
+## V1 integration readiness
+
+With every domain module above in place, this repository went through a
+dedicated integration-readiness pass rather than adding further domain
+scope: a full public-API audit (which exported symbols are
+`PUBLIC_V1`/`INTERNAL_IMPLEMENTATION`/`EXPERIMENTAL`), a data-ownership
+audit (confirming no public processing function mutates a caller-owned
+input), a nil/zero-value safety audit (every config/options struct's zero
+value is safe to use), a JSON serialization audit (every major result type
+round-trips, closing three gaps found in `financial/metrics`,
+`valuation/applicability`, and `valuation/sensitivity`), a dependency/
+licensing inventory, lightweight benchmarks on the hot paths, and targeted
+fuzz tests on the highest-risk deterministic parsers (numeric parsing,
+period parsing, CSV input, label normalization, review decision
+validation). See [`docs/V1_CONTRACTS.md`](docs/V1_CONTRACTS.md) for the
+full findings and [`docs/INTEGRATION.md`](docs/INTEGRATION.md) for the
+recommended orchestration flow this pass validated end to end via
+[`review/e2e_v1_contract_test.go`](review/e2e_v1_contract_test.go) and
+[`examples/full_flow`](examples/full_flow).
 
 ## `review`
 
@@ -4222,9 +4297,333 @@ part of a normal `go test ./...`, including CI.
 
 Not implemented, and not planned as part of this repository's own scope
 (see [What this project intentionally does not contain](#what-this-project-intentionally-does-not-contain)):
-AI OCR correction, AI financial-statement extraction, AI add-back
-recommendations, AI valuation method selection, AI multiple selection, AI
-DCF forecasting, AI report narrative generation, database persistence,
-HTTP endpoints, UI, or external comparable-sales search. Any of these would
-be a separate, later phase — this one is scoped strictly to optional,
-human-reviewed classification fallback.
+AI OCR correction, AI financial-statement extraction, AI valuation method
+selection, AI multiple selection, AI DCF forecasting, AI report narrative
+generation, database persistence, HTTP endpoints, UI, or external
+comparable-sales search. Any of these would be a separate, later phase —
+this one is scoped strictly to optional, human-reviewed classification
+fallback. (AI add-back/adjustment suggestions are a separate, narrower
+capability — see [AI adjustment suggestions](#ai-adjustment-suggestions)
+below — not a general recommendation engine.)
+
+## AI adjustment suggestions
+
+The second (and, for now, last) AI capability in this repository: an
+**entirely optional** assistant that proposes normalization/add-back
+**suggestions** over already-confirmed financial rows. Like [AI fallback
+classification](#ai-fallback-classification), it never acts on its own —
+every suggestion becomes a `review.ReviewItem` (`KindAdjustment`, always
+`Required == true`) and requires an explicit human decision before the
+deterministic `financial/adjustments` engine may use it.
+
+```
+Confirmed financial rows
+        ↓
+deterministic candidate selection
+        ↓
+optional AI suggestion
+        ↓
+validation against source rows
+        ↓
+review.KindAdjustment
+        ↓
+human confirmation
+        ↓
+deterministic adjustment engine
+        ↓
+normalized earnings
+```
+
+**Core safety rules** (enforced by `financial/adjustments/ai.ValidateSuggestions`,
+never by trusting the provider):
+
+- **AI never invents a financial amount.** Every suggestion must reference
+  an existing `SourceRow` (row id + period) the caller explicitly supplied,
+  and the suggested `Amount` must EXACTLY equal that row's own `Amount`. A
+  mismatch of any size is rejected outright — never rounded, scaled, or
+  "repaired."
+- **AI never applies an adjustment.** `ToAdjustments` always builds
+  `adjustments.Adjustment` values with `Included == false`; only a
+  `review.Decision` (via the existing `review` package — see [Review
+  integration](#review-integration-1) below) can flip that to `true`, and
+  only `financial/adjustments.Apply` ever changes normalized EBITDA/SDE.
+- **AI never changes source data or canonical classification** — this
+  package has no write access to `financial.MappedLineItem`/
+  `financial.RawLineItem`/`financial.Code` at all; it only reads
+  caller-supplied `SourceRow` values.
+- **AI never invents a replacement salary or market rent.** For owner
+  compensation normalization or related-party rent, the model may flag
+  that a row "appears potentially discretionary / requires normalization
+  review" and set `Suggestion.RequiresUserInput = true`, but it must not
+  propose what the replacement benchmark figure should be — see
+  [`REQUIRES_USER_INPUT`](#requires_user_input-benchmark-values) below.
+- **A closed-set adjustment taxonomy.** `Suggestion.AdjustmentType` must be
+  a member of the `Request.AllowedTypes` closed set (built from the
+  repository's actual `adjustments.AllTypes()` — never a duplicated or
+  renamed enum); anything else is rejected as `IssueInvalidAdjustmentType`.
+
+**Package layout:**
+
+- **`financial/adjustments/ai`** — the provider-neutral boundary,
+  deterministic candidate selection, and all validation/orchestration
+  logic. Imports only `financial` and `financial/adjustments` — no AI SDK.
+  Exported surface: `Suggester` (the interface every provider adapter
+  implements), `Request`/`Response`/`SourceRow`/`Suggestion`/`AllowedType`/
+  `ContextRow`/`MultiYearValue` (the wire contract), `Policy`/`Mode`
+  (on/off trigger), `CandidatePolicy`/`SelectCandidates` (deterministic
+  candidate rules), `BatchPolicy`/`BuildRequests` (cost-bounded batching),
+  `SuggestAdjustments`/`SuggestAdjustmentsBatch` (orchestration entry
+  points), `ValidateSuggestions`/`ValidatedSuggestion` (source-bound
+  validation), `Provenance`/`Outcome`/`BatchOutcome`/`RejectedSuggestion`
+  (the audit/result shapes), `Issue`/`IssueCode` (this package's own error
+  taxonomy), `FakeSuggester` (a credential-free test double),
+  `ToAdjustments`/`RequiredAdjustmentIDs` (conversion into the existing
+  `review`/`adjustments` domain).
+- **`financial/adjustments/ai/openai`** — one concrete provider adapter,
+  using the same `github.com/openai/openai-go/v2` SDK as
+  `financial/classification/ai/openai`, kept as an entirely independent
+  package (different `Config`/`Suggester` types, different Structured
+  Outputs schema) since the two AI capabilities solve different problems
+  with different wire contracts — see that package's own doc comment.
+
+### Why this is a second, independent capability (not reused classification AI)
+
+`financial/classification/ai` answers "what canonical code is this row?"
+for one row at a time, with amounts deliberately excluded from its request
+(see that section's privacy policy). `financial/adjustments/ai` answers a
+different question — "does this already-classified row look like a
+normalization candidate, and if so, which adjustment type?" — for a
+**bounded batch** of rows, and amounts are unavoidably part of the
+question, since a suggestion is only meaningful tied to a specific dollar
+figure (see [Privacy: amounts are necessary
+here](#privacy-amounts-are-necessary-here)). Forcing both capabilities
+through one shared `Classifier`/`Request` shape would either strip
+amounts from a use case that needs them or leak them into a use case that
+must never carry them — so this package defines its own
+`Suggester`/`Request`/`Response`, reusing established *patterns*
+(explicit `Config`, `Store: false`, Structured Outputs, character-budgeted
+batching, `FakeSuggester`/`FakeClassifier`-style test doubles) rather than
+a shared abstraction.
+
+### Deterministic candidate selection
+
+`SelectCandidates(rows []SourceRow, policy CandidatePolicy) []SourceRow`
+never sends "every row in the dataset" to a provider. A row becomes a
+candidate only if:
+
+- its `RowID` is explicitly listed in `CandidatePolicy.ExplicitRowIDs`
+  (the caller hand-picks it), or
+- `CandidatePolicy.EnableCodeRules` is true (opt-in, like every AI trigger
+  in this repository) and its `Code` is a member of `CandidatePolicy.Codes`
+  (or the default `CandidateCodes`: owner compensation, vehicle, travel,
+  professional fees, repairs, other operating expense, other income, other
+  expense).
+
+Regardless of policy, a **structural row** (`RowKind` heading/subtotal/
+total) or a row flagged **`AmbiguousOCR`** (unconfirmed OCR-derived amount
+— see `review.OCRNumericPayload.Ambiguous`) is never selected, and is
+rejected again defensively at validation time even if a caller bypasses
+`SelectCandidates` and builds a `Request` by hand. `CandidatePolicy.MaxRows`
+(default `DefaultMaxCandidateRows` = 40) bounds the result; explicit-ID
+matches are preferred over code-rule matches when truncating, so a
+caller-forced row is never silently dropped ahead of a merely heuristic
+one.
+
+### Privacy: amounts are necessary here
+
+Unlike `financial/classification/ai.Request`, `financial/adjustments/ai.Request`
+**does include amounts** — this is a deliberate, documented difference,
+not an oversight. A `SourceRow` carries:
+
+- row id, period, label, parent label
+- canonical `Code` and `StatementType`, when known
+- the row's own `Amount` (required — an adjustment suggestion is
+  inescapably about a specific dollar figure)
+- `RowKind`/`AmbiguousOCR` (safety flags, never sent onward as "context")
+
+Plus, at the `Request` level: the closed `AllowedTypes` set, an optional
+caller-supplied `IndustryContext` string, an optional bounded
+`ContextRows` window (label/parent-label only — **`ContextRow` has no
+amount field at all**, pinned by
+`openai.TestPrivacy_ContextRowsNeverCarryAmounts`-style tests), and
+optional `MultiYearValues` (other periods' amounts for the *same*
+row/account, only when the caller judges the trend useful).
+
+**Never sent:** customer identity, user identity, bank details, tax IDs,
+full uploaded statements, or any row not explicitly selected as a
+candidate. `financial/adjustments/ai`'s own `TestPrivacy_*` tests assert on
+the literal marshaled request payload to keep this guarantee from
+silently drifting.
+
+### `REQUIRES_USER_INPUT`: benchmark values
+
+For `adjustments.TypeOwnerCompensationNormalization` and
+`adjustments.TypeRelatedPartyRentAdjustment` — the two adjustment types
+that inherently require an externally-benchmarked replacement figure (a
+market-rate salary, a fair-market rent) — the model may set
+`Suggestion.RequiresUserInput = true` while still pointing at the row
+being flagged (e.g. "Officer Compensation appears potentially
+discretionary / requires normalization review"). It must never propose
+what that benchmark should be.
+
+`ToAdjustments` converts such a suggestion into an `adjustments.Adjustment`
+with `Amount: 0` (never the flagged current amount reinterpreted as a
+normalization delta) and a `Notes` string stating a benchmark is still
+needed. The adjustment stays `Included: false` and, with no `Effect` set
+and no default available for these two types, cannot pass
+`adjustments.Validate` until a human supplies the real figure — via a
+`review.Decision` with `ActionOverride`/`AdjustmentDecision.NewAmount` (the
+existing, unmodified review-domain lever for correcting an adjustment
+amount).
+
+### Structured response schema
+
+Conceptually:
+
+```json
+{
+  "suggestions": [
+    {
+      "source_row_id": "row-27",
+      "period": "2025",
+      "adjustment_type": "one_time_expense",
+      "amount": 42000,
+      "direction": "INCREASE_EARNINGS",
+      "reason": "The label indicates a one-time relocation expense.",
+      "confidence": 0.78,
+      "requires_user_input": false
+    }
+  ]
+}
+```
+
+The OpenAI adapter enforces this with Structured Outputs (`strict: true`),
+so every response is guaranteed to parse rather than requiring free-text
+scraping — see `financial/adjustments/ai/openai/prompt.go`.
+
+### Validation (`ValidateSuggestions`)
+
+Every suggestion is checked, independently, against the exact `Request`
+that (supposedly) produced it. Rejected, with a specific `IssueCode`, when:
+
+- the referenced source row does not exist (`IssueUnknownSourceRow`)
+- the period does not match that row's own period (`IssueWrongPeriod`)
+- the amount does not EXACTLY match the source row's amount
+  (`IssueInventedAmount`) — no tolerance under MVP rules
+- the adjustment type is not in the closed set
+  (`IssueInvalidAdjustmentType`)
+- the direction is incompatible with that type's fixed
+  `adjustments.TypeMeta.DefaultEffect` (`IssueIncompatibleDirection`) — a
+  type with no fixed default (`TypeCustom`,
+  `TypeRelatedPartyRentAdjustment`) accepts either direction, since the
+  real-world sign genuinely varies
+- the source row is structural (`IssueStructuralSourceRow`) or
+  `AmbiguousOCR` (`IssueAmbiguousSourceAmount`)
+- another suggestion in the same response already targets the same (row,
+  period, type) (`IssueDuplicateSuggestion`)
+- the amount or confidence is non-finite (`IssueNonFiniteAmount`)
+
+A rejected suggestion is never silently repaired — it is discarded, with
+the reason preserved on `Outcome.Rejected` for diagnostics, and never
+reaches `ToAdjustments`.
+
+### Review integration
+
+`financial/adjustments/ai` does not create a second review system. A valid
+suggestion becomes an ordinary `adjustments.Adjustment`
+(`ai.ToAdjustments`, always `Included: false`), and
+`ai.RequiredAdjustmentIDs(adjs)` gives the caller the set to pass as
+`review.BuildInput.RequiredAdjustmentIDs` — the one small, additive
+extension `review.Build` gained for this capability
+(`buildAdjustmentItems` now checks `RequiredAdjustmentIDs` and, when set,
+raises that item to `Required: true`/`SeverityWarning`, versus the existing
+default `Required: false`/`SeverityInfo` for an ordinary caller-constructed
+adjustment). From there it is the exact same `KindAdjustment` review item,
+`AdjustmentDecision`, and `applyAdjustmentDecision` code path any other
+adjustment confirmation uses:
+
+- **ACCEPT** (`AdjustmentDecision{Included: true}`) → the adjustment's
+  `Included` becomes `true`, ready for `adjustments.Apply`.
+- **REJECT/EXCLUDE** (`ActionIgnore`, or `ActionOverride` with
+  `Included: false`) → `Included` stays/becomes `false`; the suggestion
+  never reaches a bridge.
+- **Modify amount** — only via `AdjustmentDecision.NewAmount`, the same
+  lever used to supply a `REQUIRES_USER_INPUT` benchmark value or correct
+  any other adjustment's amount; `review.Apply`'s existing
+  `IssueNonFiniteAmount` validation applies identically.
+
+### Readiness
+
+An unresolved AI adjustment suggestion's review item is `Required: true`
+but `SeverityWarning`, never `SeverityBlocking` — `EvaluateReadiness` (a
+pure function of `Severity`+`Status`, unchanged by this capability) reports
+`READY_WITH_WARNINGS`, not `NOT_READY`, while it sits unresolved. AI
+finding a possible add-back must never by itself block a valuation a
+caller is otherwise ready to run. A caller wanting stricter behavior
+enforces its own policy on top — e.g. refusing to proceed while
+`ApplyResult.UnresolvedRequired` is non-empty — independent of
+`Readiness.State`.
+
+### Failure behavior
+
+Provider failure never blocks the deterministic pipeline. `SuggestAdjustments`
+never returns a Go error: a disabled `Policy`, a nil `Suggester`, or a
+`Suggester.Suggest` error (timeout, rate limit, transport failure) all
+produce a normal `Outcome` with `Valid == nil` and a structured `Issue`
+(`IssueProviderUnavailable`/`IssueTimeout`/`IssueRateLimited`/
+`IssueProviderError`) explaining why — the caller decides whether/how to
+surface that, and the rest of the deterministic ingestion → classification
+→ review → adjustments → valuation pipeline is entirely unaffected.
+`SuggestAdjustmentsBatch` isolates one request chunk's failure from every
+other chunk in the same batch.
+
+### Batching and cost controls
+
+`BuildRequests(candidates, allowedTypes, industryContext, contextByRowID,
+multiYearByRowID, policy BatchPolicy)` deterministically splits a candidate
+set into one or more bounded `Request` values: `BatchPolicy.MaxCandidateRows`
+(default `DefaultMaxCandidateRows` = 40) caps rows per request,
+`BatchPolicy.MaxRequestCharacters` (default `DefaultMaxRequestCharacters` =
+24000) caps the estimated marshaled-JSON size, and the two compose —
+whichever limit is hit first ends the current chunk. A single row whose own
+estimated size already exceeds the character budget is never dropped; it
+forms its own one-row chunk. Source identity (row id + period) is preserved
+verbatim across chunks, so a caller can always reassemble which candidate a
+returned suggestion belongs to. `Policy.Timeout` (default `DefaultTimeout`
+= 30s) bounds each underlying provider call.
+
+### Provider adapter (`financial/adjustments/ai/openai`)
+
+Mirrors `financial/classification/ai/openai`'s conventions: explicit
+`Config`/`New` (no global client), `NewFromEnv()` as the one named opt-in
+convenience constructor reading `OPENAI_API_KEY`/`OPENAI_MODEL`/
+`OPENAI_BASE_URL`, `Store: false` on every request, Structured Outputs for
+guaranteed-parseable responses, `ctx` cancellation respected directly with
+no hidden retries, and no logging of raw request/response contents by
+default. Independent `Config`/`Suggester` types from the classification
+adapter (see [Why this is a second, independent
+capability](#why-this-is-a-second-independent-capability-not-reused-classification-ai)).
+
+### Testing without credentials
+
+Every test in `financial/adjustments/ai` and
+`financial/adjustments/ai/openai` except one runs with zero network access
+and zero credentials, using `ai.FakeSuggester` (a fully in-memory
+`Suggester`). The one exception,
+`openai.TestIntegration_RealProvider`, is opt-in only: `SKIPPED — provider
+credentials not configured` unless `OPENAI_API_KEY` is set, kept to a tiny
+two-candidate-row request to avoid meaningful API cost, and verifies the
+response parses correctly and every returned suggestion is source-bound
+(passes `ai.ValidateSuggestions` against the exact request sent). It never
+runs as part of a normal `go test ./...`, including CI.
+
+### Explicit non-goals
+
+Not implemented, and not planned as part of this capability's scope: AI
+creating financial amounts out of thin air, AI replacement-salary
+estimates, AI market-rent estimates, AI valuation multiples, AI
+comparables search, AI forecasts, AI valuation calculations, AI report
+narrative generation, database persistence, HTTP endpoints, or UI. This
+capability is scoped strictly to optional, source-bound, human-reviewed
+adjustment suggestions — the deterministic `financial/adjustments` engine
+remains the only code that ever changes normalized EBITDA/SDE.

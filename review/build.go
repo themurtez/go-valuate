@@ -177,6 +177,23 @@ type BuildInput struct {
 	// every one supplied here simply gets a review item to confirm it.
 	Adjustments []adjustments.Adjustment
 
+	// RequiredAdjustmentIDs marks specific Adjustments' IDs (matching
+	// adjustments.Adjustment.ID) as requiring explicit human confirmation
+	// before they should be trusted — e.g. an AI-suggested adjustment (see
+	// financial/adjustments/ai.ToAdjustments), which per this repository's
+	// AI-suggestion product rule must always reach a human as a Required
+	// item, unlike an ordinary caller-constructed adjustment (which
+	// defaults to Required == false — a caller already trusts its own
+	// adjustments enough to construct them directly). An ID present here
+	// that does not match any Adjustments entry is simply ignored. Marking
+	// an adjustment Required escalates its Severity from SeverityInfo to
+	// SeverityWarning (never SeverityBlocking — see the package's
+	// readiness-policy note: an unresolved AI suggestion alone must never
+	// force NOT_READY; a caller wanting that stronger gate applies its own
+	// stricter policy on top, e.g. by not calling valuation until every
+	// Required item is resolved, independent of readiness.State).
+	RequiredAdjustmentIDs map[string]bool
+
 	// Assumptions, when non-nil and Policy.EnableAssumptionReview is true,
 	// supplies resolved valuation settings to expose as
 	// KindValuationAssumption items. Carried as a small local interface
@@ -768,7 +785,10 @@ func buildAdjustmentID(adjID string) string {
 // buildAdjustmentItems creates one confirmation item per supplied
 // adjustments.Adjustment, per section 9: Build never generates an
 // adjustment itself, it only creates a review item to confirm one the
-// caller already constructed.
+// caller already constructed. An adjustment whose ID is present in
+// in.RequiredAdjustmentIDs (e.g. an AI-suggested one) gets Required == true
+// and SeverityWarning instead of the default Required == false/
+// SeverityInfo — see BuildInput.RequiredAdjustmentIDs' doc comment.
 func buildAdjustmentItems(in BuildInput, _ Policy) []ReviewItem {
 	adjs := make([]adjustments.Adjustment, len(in.Adjustments))
 	copy(adjs, in.Adjustments)
@@ -776,11 +796,17 @@ func buildAdjustmentItems(in BuildInput, _ Policy) []ReviewItem {
 
 	items := make([]ReviewItem, 0, len(adjs))
 	for _, adj := range adjs {
+		severity := SeverityInfo
+		required := false
+		if in.RequiredAdjustmentIDs[string(adj.ID)] {
+			severity = SeverityWarning
+			required = true
+		}
 		items = append(items, ReviewItem{
 			ID:            buildAdjustmentID(string(adj.ID)),
 			Kind:          KindAdjustment,
-			Severity:      SeverityInfo,
-			Required:      false,
+			Severity:      severity,
+			Required:      required,
 			Title:         fmt.Sprintf("Adjustment confirmation: %s", adj.Type),
 			Reason:        adj.Reason,
 			Period:        adj.Period,

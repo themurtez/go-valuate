@@ -14,15 +14,19 @@ import (
 	"golang.org/x/image/tiff"
 )
 
-// Error is a fatal page-image-extraction error, mirroring ingestion.Error's
-// Code/Message/Detail shape.
-type Error struct {
+// extractError is a fatal page-image-extraction error, mirroring
+// ingestion.Error's Code/Message/Detail shape. Unexported: every caller of
+// this package (ingestion/pdf) handles it through the plain `error`
+// interface returned by PageCount/PageDims/ExtractPageImages, never a
+// concrete *extractError — see the package doc comment on why this
+// package's exported API surface stays intentionally small.
+type extractError struct {
 	Code    string
 	Message string
 	Detail  string
 }
 
-func (e *Error) Error() string {
+func (e *extractError) Error() string {
 	if e.Detail != "" {
 		return "pdfimage: " + e.Code + ": " + e.Message + " (" + e.Detail + ")"
 	}
@@ -30,12 +34,9 @@ func (e *Error) Error() string {
 }
 
 const (
-	// ErrCodeInvalidPDF means pdfcpu could not read/validate the input as a
+	// errCodeInvalidPDF means pdfcpu could not read/validate the input as a
 	// PDF at all.
-	ErrCodeInvalidPDF = "INVALID_FILE"
-	// ErrCodePageOutOfRange means the requested 1-based page number exceeds
-	// the document's page count.
-	ErrCodePageOutOfRange = "PAGE_OUT_OF_RANGE"
+	errCodeInvalidPDF = "INVALID_FILE"
 )
 
 // newConfig returns a pdfcpu configuration with UnsupportedResourceSkip so
@@ -57,7 +58,7 @@ func newConfig() *model.Configuration {
 func PageCount(r io.ReadSeeker) (int, error) {
 	n, err := api.PageCount(r, newConfig())
 	if err != nil {
-		return 0, &Error{Code: ErrCodeInvalidPDF, Message: "failed to read PDF page count", Detail: err.Error()}
+		return 0, &extractError{Code: errCodeInvalidPDF, Message: "failed to read PDF page count", Detail: err.Error()}
 	}
 	return n, nil
 }
@@ -67,7 +68,7 @@ func PageCount(r io.ReadSeeker) (int, error) {
 func PageDims(r io.ReadSeeker) ([]PageDimensions, error) {
 	dims, err := api.PageDims(r, newConfig())
 	if err != nil {
-		return nil, &Error{Code: ErrCodeInvalidPDF, Message: "failed to read PDF page dimensions", Detail: err.Error()}
+		return nil, &extractError{Code: errCodeInvalidPDF, Message: "failed to read PDF page dimensions", Detail: err.Error()}
 	}
 	out := make([]PageDimensions, len(dims))
 	for i, d := range dims {
@@ -89,8 +90,8 @@ func ExtractPageImages(r io.ReadSeeker, pageNumber int) (images []PageImage, ski
 	selected := []string{strconv.Itoa(pageNumber)}
 	rawPages, extractErr := api.ExtractImagesRaw(r, selected, newConfig())
 	if extractErr != nil && rawPages == nil {
-		return nil, 0, &Error{
-			Code:    ErrCodeInvalidPDF,
+		return nil, 0, &extractError{
+			Code:    errCodeInvalidPDF,
 			Message: fmt.Sprintf("failed to extract images from page %d", pageNumber),
 			Detail:  extractErr.Error(),
 		}
