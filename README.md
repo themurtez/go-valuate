@@ -261,6 +261,7 @@ go-valuate/
   analytics/ratios/          financial-ratio suite: profitability/liquidity/leverage/efficiency/growth, trends, signals
   analytics/cashflow/        EBITDA-to-free-cash-flow bridge, conversion ratios, coverage, burn/runway
   analytics/revenuequality/  revenue composition, growth/volatility, customer retention, concentration
+  analytics/concentration/   customer/vendor concentration risk: shares, HHI, dependency changes, loss scenarios
   valuation/                 common valuation result envelope (value types, bridge, issues)
   valuation/sde/              SDE multiple method
   valuation/ebitda/           EBITDA multiple method
@@ -2807,6 +2808,157 @@ unreconciled customer revenue, and JSON/determinism) exercised against both
 the repository's realistic multi-year fixtures and hand-built minimal
 datasets.
 
+### `analytics/concentration`
+
+A deterministic **concentration-risk analysis**: how dependent a business is
+on its largest customers, suppliers, or any other counterparty relationship,
+from caller-supplied revenue/spend observations.
+
+Unlike `analytics/revenuequality` (which reads optional customer detail as
+an enrichment of a normalized `financial.FinancialDataset`), this package is
+**entirely independent of `financial.FinancialDataset` and the
+`financial.Code` taxonomy**. Concentration analysis is frequently performed
+on data a financial dataset never carries: a per-customer invoicing export,
+per-vendor accounts-payable detail, or per-referral-source revenue. So this
+package defines its own minimal, fully portable
+`Observation{EntityKey, Period, Amount, Category}` tuple and never requires
+a dataset-shaped input. `Input.Basis` (`customer_revenue`/`supplier_spend`/
+`other`) labels what `Amount` represents purely for display — every metric
+(shares, HHI, ranking, scenarios) is computed identically regardless of
+`Basis`.
+
+`EntityKey` is an opaque, caller-assigned string — this package never
+requires, stores, or infers any real name, email, address, or other PII,
+the same privacy convention `analytics/revenuequality.CustomerPeriodRevenue`
+established for customer-level detail.
+
+Every function is pure — no I/O, no mutation of caller-owned input — and
+`Calculate` returns byte-for-byte identical JSON across repeated runs
+against identical input, regardless of Go's randomized map iteration order.
+
+```go
+rate := 0.35 // caller's blended contribution-margin assumption
+res := concentration.Calculate(concentration.Input{
+    Basis: concentration.BasisCustomerRevenue,
+    Observations: []concentration.Observation{
+        {EntityKey: "cust-1", Period: "2024", Amount: 700_000, Category: "enterprise"},
+        {EntityKey: "cust-2", Period: "2024", Amount: 150_000, Category: "smb"},
+        {EntityKey: "cust-1", Period: "2025", Amount: 850_000, Category: "enterprise"},
+        {EntityKey: "cust-2", Period: "2025", Amount: 100_000, Category: "smb"},
+    },
+    PeriodMeta: map[financial.Period]concentration.PeriodInfo{
+        "2024": {Type: concentration.PeriodTypeFiscalYear, FiscalYear: 2024},
+        "2025": {Type: concentration.PeriodTypeFiscalYear, FiscalYear: 2025},
+    },
+    Policy: concentration.Policy{DefaultImpactMarginRate: &rate},
+}, concentration.Options{})
+
+latest := res.History[len(res.History)-1]
+fmt.Println(latest.LargestEntityShare.Value, latest.HHI.Value)
+fmt.Println(res.Scenarios[0].TotalEarningsImpact.Value) // lost-largest-entity earnings impact
+```
+
+#### Per-period concentration
+
+Each `PeriodConcentration` in `History` carries `RankedEntities` (sorted
+descending by amount, ties broken by `EntityKey` for determinism),
+`LargestEntityShare`, `TopNShares` (one per `Policy.TopN` cutoff, default
+`[1, 3, 5, 10]`), `HHI` (the conventional 0–10,000-scale
+Herfindahl-Hirschman Index), and an optional `Categories` breakdown.
+`LargestShareTrend`/`HHITrend` (first-vs-last, the same fixed ±5% flat band
+every sibling package's `Trend` uses) require `Input.PeriodMeta` to
+establish chronological order — without it, per-period `History` still
+computes fully (in order of first appearance), but trends, dependency
+changes, and scenarios are left `Unavailable` with an advisory
+`NO_PERIOD_META` warning.
+
+#### Dependency changes
+
+Each `DependencyChange` compares one entity's amount and share of total
+between two chronologically adjacent periods — mirroring
+`revenuequality.CustomerTransition`'s identical adjacent-period-only
+convention, but reported as one flat record per (entity, period-pair)
+rather than pre-aggregated new/lost/retained categories, since a caller
+most often wants dependency changes sorted or filtered per entity.
+`FromAmount`/`ToAmount` being `Unavailable` (rather than `0`) distinguishes
+"this entity had no observation in this period" from "this entity had a
+zero-dollar observation."
+
+#### Scenarios
+
+`Scenarios` always includes `ScenarioLostLargestEntity` plus one
+`ScenarioTopNLoss` per `Policy.ScenarioTopN` cutoff (default `[3, 5]`), all
+computed against the chronologically most recent period in `History` —
+concentration risk is a point-in-time diligence question, not a trend, the
+same convention `revenuequality.ConcentrationSummary` uses. Each
+`Scenario.TotalRevenueImpact`/`RemainingRevenue`/`RevenueImpactPercent` is
+always available; `TotalEarningsImpact` is available only if **every**
+entity the scenario removes has an applicable margin rate (a partial sum
+would understate the true earnings impact without saying so). A margin
+rate applies per entity from `Policy.EntityImpactAssumptions` (a per-entity
+override) or `Policy.DefaultImpactMarginRate` (a blended default); if
+neither is supplied for an entity a scenario removes, that scenario's
+`TotalEarningsImpact` (and that entity's own `EntityImpact.EarningsImpact`)
+is left `Unavailable` and `NO_IMPACT_ASSUMPTION` is recorded as an advisory
+warning — this package never invents a margin assumption a caller did not
+supply, and the warning is scoped only to entities a configured `Scenario`
+actually removes.
+
+#### What `Result` contains
+
+| Field | What it is |
+|---|---|
+| `History` | One `PeriodConcentration` per period (chronological when `PeriodMeta` is supplied and complete, else order of first appearance): entity count, total amount, ranked entities, top-N shares, HHI, category breakdown. |
+| `LargestShareTrend` / `HHITrend` | First-vs-last direction characterization of `LargestEntityShare`/`HHI` across `History`. |
+| `DependencyChanges` | One `DependencyChange` per entity active in either side of every chronologically adjacent period pair — see above. |
+| `Scenarios` | `ScenarioLostLargestEntity` plus one `ScenarioTopNLoss` per `Policy.ScenarioTopN`, computed against the most recent period — see above. |
+| `Flags` | Deterministic, `Thresholds`-driven signals (see below), ordered by `FlagCode`'s declaration order, then `Period`. |
+| `Warnings` / `Errors` | Structured `Issue`s (own `IssueCode` system) for input-level problems (`NO_OBSERVATIONS`, `INVALID_OBSERVATION`, `NO_PERIOD_META`, `PERIOD_MISSING_FROM_META`, `NO_IMPACT_ASSUMPTION`). |
+
+#### Flags
+
+`Options.Thresholds` (zero value resolves to `DefaultThresholds()`)
+configures five rule-based, deterministic triggers:
+`HIGH_LARGEST_ENTITY_CONCENTRATION`, `HIGH_TOP_5_CONCENTRATION` (only
+evaluated if `Policy.TopN` includes `5`), `HIGH_HHI` (default 2500, the
+U.S. DOJ/FTC "highly concentrated" merger-guidelines figure, used only as a
+familiar reference point), `INCREASING_CONCENTRATION`, and
+`HIGH_SCENARIO_IMPACT`. Every `Flag` carries a stable `Code`, a `Severity`
+(`info`/`warning`/`critical`), the specific `Value`/`Threshold` compared,
+and a pre-filled `Message` (display only, never parsed) — no AI/LLM, no
+opaque scoring, mirroring every analytics sibling package's identical
+`Flag` design.
+
+#### Exported surface, by file
+
+- **`types.go`** — `Input`, `Options`, `Result`, `PeriodInfo`/`PeriodType`,
+  `ConcentrationValue`/`Unavailable`/`AvailableValue`, `Basis`,
+  `Observation`, `EntityImpactAssumption`,
+  `Policy`/`DefaultPolicy()`, `RankedEntity`, `TopNShare`, `CategoryShare`,
+  `PeriodConcentration`, `TrendDirection`/`Trend`, `DependencyChange`,
+  `EntityImpact`, `ScenarioKind`, `Scenario`,
+  `Thresholds`/`DefaultThresholds()`, `FlagCode`/`FlagSeverity`/`Flag`,
+  `IssueCode`/`IssueSeverity`/`Issue`, `HasErrors`, `FormulaVersion`.
+- **`concentration.go`** — `Calculate(Input, Options) Result`: wires every
+  section together.
+- **`periods.go`** — observation validation, period ordering, and
+  `PeriodConcentration` (ranking, top-N shares, HHI, categories)
+  computation.
+- **`stats.go`** — `Trend` computation for `LargestShareTrend`/`HHITrend`.
+- **`dependency.go`** — `DependencyChanges` computation.
+- **`scenarios.go`** — `Scenarios` (lost-largest-entity, top-N-loss, and
+  the optional earnings-impact conversion) computation.
+- **`flags.go`** — every deterministic flag-trigger rule.
+
+See [`analytics/concentration/concentration_test.go`](analytics/concentration/concentration_test.go),
+[`analytics/concentration/determinism_test.go`](analytics/concentration/determinism_test.go),
+and [`analytics/concentration/roundtrip_test.go`](analytics/concentration/roundtrip_test.go)
+for every scenario (highly concentrated single-customer dependency,
+diversified base, one customer, changing concentration with dependency
+changes, zero/negative/malformed observations, top-N-loss scenarios with
+default and per-entity margin assumptions, category breakdown, missing
+`PeriodMeta`, and JSON/determinism) exercised against hand-built fixtures.
+
 ### `valuation`
 
 Implements the individual valuation methods themselves: SDE multiple,
@@ -3978,6 +4130,7 @@ persist historical valuations").
 | Ratio signal rules | `ratios.SignalRulesVersion`, echoed on `ratios.Result.SignalRulesVersion` | The fixed `DefaultThresholds` and every signal-trigger rule in `signals.go` (`analytics/ratios`) — versioned separately from `ratios.FormulaVersion` since a caller may change how ratios are computed independently of which signals are derived from them |
 | Cash-flow analysis formulas | `cashflow.FormulaVersion`, echoed on `cashflow.Result.FormulaVersion` | The EBITDA-to-free-cash-flow bridge, every conversion ratio, the `RecurringDrains`/`CashRunway` formulas, the `DefaultThresholds` flag-trigger rules, and the EBITDA-based estimate method used under `Options.AllowEBITDAEstimate` (`analytics/cashflow`) |
 | Revenue-quality analysis formulas | `revenuequality.FormulaVersion`, echoed on `revenuequality.Result.FormulaVersion` | The recurring/non-recurring revenue split, the `Statistics`/`Trend`/`CAGRResult`/`VolatilityResult` formulas, the customer-transition (new/lost/retained/expansion/contraction) formulas, the `ConcentrationSummary`/HHI formula, and the `DefaultThresholds` flag-trigger rules (`analytics/revenuequality`) |
+| Concentration analysis formulas | `concentration.FormulaVersion`, echoed on `concentration.Result.FormulaVersion` | The top-N-share/HHI formulas, the entity-ranking and `DependencyChange` methodology, the lost-entity/top-N-loss `Scenario` formulas (including the optional earnings-impact conversion), and the `DefaultThresholds` flag-trigger rules (`analytics/concentration`) |
 | AI request/response schema | `ai.RequestSchemaVersion`, echoed on `ai.Provenance.RequestSchemaVersion` | The `Request`/`Response` wire shape `financial/classification/ai` sends to/expects from a `Classifier` |
 | AI fallback orchestration | `ai.OrchestrationVersion`, echoed on `ai.Provenance.OrchestrationVersion` | The trigger/fallback/safety decision logic in `ClassifyWithFallback`/`ClassifyBatchWithFallback` (which `FallbackMode` runs AI when, structural-row skipping, disagreement handling) |
 | OpenAI adapter (classification) | `openai.AdapterVersion`, echoed on `ai.Provenance.AdapterVersion` | This specific provider adapter's prompt-construction/response-parsing logic (`financial/classification/ai/openai`) |
