@@ -22,9 +22,9 @@ Every stage below is a pure function of the previous stage's output — no
 I/O, no shared mutable state, no hidden global config:
 
 ```
-CSV / XLSX bytes
+CSV / XLSX / Text PDF bytes
         ↓
-Tabular Ingestion          (ingestion, ingestion/csv, ingestion/xlsx)
+Tabular Ingestion          (ingestion, ingestion/csv, ingestion/xlsx, ingestion/pdf)
         ↓
 Raw financial rows
         ↓
@@ -55,6 +55,28 @@ Sensitivity                 (valuation/sensitivity)
 Report Model                 (valuation/report)
 ```
 
+The ingestion stage in detail — the shape every input adapter converges on
+before classification ever runs:
+
+```
+CSV / XLSX / Text PDF
+          ↓
+      Ingestion
+          ↓
+  Raw Financial Rows
+          ↓
+    Classification
+          ↓
+ User Confirmation
+   (future app)
+          ↓
+     Normalize
+```
+
+**Image/scanned PDFs are not parsed yet. They return `OCR_REQUIRED`.** See
+[`ingestion/pdf`](#ingestionpdf) below for the exact detection thresholds
+and why this package will never attempt OCR itself.
+
 A separate, cross-cutting `settings` package supplies the hierarchical
 system/account/client/valuation rate/multiple/method-enable resolution
 (see [`settings`](#settings) below) that the orchestrator and individual
@@ -64,13 +86,17 @@ and handed into a run rather than looked up mid-calculation (see
 [Settings snapshot contract](#settings-snapshot-contract)).
 
 **What is deliberately absent from every stage above, and from this
-repository entirely:** no database, no HTTP/API layer, no AI/LLM, no PDF
-parsing or OCR. Deterministic CSV/XLSX tabular ingestion (`ingestion`,
-`ingestion/csv`, `ingestion/xlsx`) is the one exception to the
+repository entirely:** no database, no HTTP/API layer, no AI/LLM, no OCR.
+Deterministic tabular ingestion (`ingestion`, `ingestion/csv`,
+`ingestion/xlsx`, and — as of text-based PDF support —
+[`ingestion/pdf`](#ingestionpdf)) is the one exception to the
 "no document parsing" rule established in earlier revisions of this
 README — see [`ingestion`](#ingestion) below for why a purely
-structural, non-AI, non-database tabular reader fits this repository's
-constraints while PDF/OCR still does not — see
+structural, non-AI, non-database reader fits this repository's
+constraints. This still does NOT include OCR or image/scanned PDFs:
+`ingestion/pdf` reads only a PDF's own embedded text layer
+deterministically and returns an explicit `OCR_REQUIRED` condition,
+never fabricated content, when no usable text layer exists — see
 [What this project intentionally does not contain](#what-this-project-intentionally-does-not-contain)
 below for the full list and the reasoning behind it. Every stage's output
 is plain, JSON-serializable Go structs; see
@@ -91,19 +117,27 @@ contains **no**:
 - Stripe, subscriptions, or billing
 - Vue or any frontend code
 - AI/LLM integrations
-- PDF parsing or OCR
+- OCR, image preprocessing, or scanned-document parsing
 - cloud/storage integrations
+- QuickBooks/Xero or other accounting-software API integrations
+- external valuation data sources
 
-Deterministic CSV/XLSX tabular ingestion (`ingestion` and its `csv`/`xlsx`
+Deterministic tabular ingestion (`ingestion` and its `csv`/`xlsx`/`pdf`
 subpackages — see [`ingestion`](#ingestion) below) is a narrow, deliberate
-exception: it is pure structural interpretation of already-tabular data
-(rows, columns, headers), performs no AI/ML/OCR, touches no database or
-network, and hands off to `financial/classification` — which this
-repository already contains — rather than duplicating it. PDF parsing and
-OCR remain excluded because turning an unstructured document into tabular
-data is exactly the document-understanding problem this repository's
-"no PDF/OCR" constraint rules out; ingestion only begins once data is
-already in rows and columns.
+exception: it is pure structural interpretation of data that is either
+already tabular (CSV/XLSX: rows, columns, headers) or has a deterministic
+embedded text layer a born-digital PDF's own producer wrote (text-based
+PDF — see [`ingestion/pdf`](#ingestionpdf)). It performs no AI/ML/OCR,
+touches no database or network, and hands off to
+`financial/classification` — which this repository already contains —
+rather than duplicating it. OCR and image/scanned-document parsing remain
+fully excluded, including for PDF: `ingestion/pdf` reads only a PDF's own
+embedded text layer, and a PDF with no usable text layer (an image-only or
+scanned statement) returns an explicit `OCR_REQUIRED` result rather than
+attempting any image-understanding step — turning a raster image into
+text is exactly the document-understanding/OCR problem this repository's
+constraint rules out; ingestion only begins once content is either already
+tabular or already text.
 
 The design rule is:
 
@@ -116,12 +150,13 @@ Go structs / JSON-compatible data in
 No global state. No infrastructure dependencies. No side effects. Every
 exported function in this repository is a pure function of its inputs.
 
-Deterministic CSV/XLSX tabular ingestion (structural interpretation of a
-tabular financial statement export into `financial.RawLineItem` values,
-with no classification of its own) is implemented in `ingestion` and its
-`ingestion/csv`/`ingestion/xlsx` subpackages; deterministic, rule/alias-based
-classification (deciding *which* canonical code a raw row maps to) is
-implemented in `financial/classification`;
+Deterministic tabular/text-PDF ingestion (structural interpretation of a
+tabular financial statement export, or a text-based PDF's positioned text,
+into `financial.RawLineItem` values, with no classification of its own) is
+implemented in `ingestion` and its `ingestion/csv`/`ingestion/xlsx`/
+`ingestion/pdf` subpackages; deterministic, rule/alias-based classification
+(deciding *which* canonical code a raw row maps to) is implemented in
+`financial/classification`;
 dataset-internal-consistency checking is implemented in
 `financial/reconciliation`; derived financial metrics (EBITDA, SDE, working
 capital, growth/volatility, etc.) are implemented in `financial/metrics`;
@@ -133,21 +168,22 @@ themselves (SDE multiple, EBITDA multiple, capitalization of earnings, DCF,
 adjusted net asset value) are implemented in `valuation` and its
 per-method subpackages — see below for all six. Method applicability
 rules, a multi-method consensus/weighting engine, sensitivity analysis,
-reporting/UI, AI/LLM assistance, a database, and PDF/document parsing are
-all still explicitly **out of scope for this repository** at this stage.
-They are expected to be built as later modules, or in the consuming
-application, on top of the types and packages defined here — see
+reporting/UI, AI/LLM assistance, a database, OCR, and image/scanned-document
+parsing are all still explicitly **out of scope for this repository** at
+this stage. They are expected to be built as later modules, or in the
+consuming application, on top of the types and packages defined here — see
 [Recommended next module](#recommended-next-module).
 
 ## Package boundaries
 
 ```
 go-valuate/
-  ingestion/                 CSV/XLSX bytes -> raw tabular rows (no classification)
+  ingestion/                 CSV/XLSX/PDF bytes -> raw tabular rows (no classification)
   ingestion/csv/              CSV parser (encoding/csv, zero external dependencies)
   ingestion/xlsx/              XLSX parser (github.com/xuri/excelize/v2)
-  ingestion/internal/tabular/  shared statement-interpretation logic (csv+xlsx)
-  ingestion/fixtures/         CSV/XLSX fixture corpus + XLSX generator (fixtures/gen)
+  ingestion/pdf/               text-PDF parser (github.com/ledongthuc/pdf)
+  ingestion/internal/tabular/  shared statement-interpretation logic (csv+xlsx+pdf)
+  ingestion/fixtures/         CSV/XLSX/PDF fixture corpus + generators (fixtures/gen)
   financial/                 canonical financial model, taxonomy, and normalizer
   financial/classification/  deterministic raw-row -> canonical-code classifier
   financial/reconciliation/  dataset internal-consistency checks
@@ -195,12 +231,15 @@ Normalize           (financial)
 
 `ingestion` is developed independently of any future application in the
 same way every other package here is: it is the input-adapter half of the
-"no PDF/OCR" boundary described in
+"no OCR" boundary described in
 [What this project intentionally does not contain](#what-this-project-intentionally-does-not-contain)
-— it begins only once data is already tabular (rows and columns), never
-attempts document understanding, and performs **no AI/LLM inference**
-anywhere in its detection logic. Every parser is a pure function of its
-input bytes/reader and `Options`: the same input always produces the same
+— this base package and its `csv`/`xlsx` subpackages begin only once data
+is already tabular (rows and columns; see [`ingestion/pdf`](#ingestionpdf)
+for the text-based-PDF adapter, which begins once data is already text),
+never attempt document understanding beyond that, and perform **no AI/LLM
+inference** anywhere in their detection logic. Every parser is a pure
+function of its input bytes/reader and `Options`: the same input always
+produces the same
 `Result`.
 
 **Package layout.**
@@ -242,17 +281,24 @@ numeric value is, whether a row is blank/heading/subtotal/total, and
 `"Advertising"` maps to `OPEX_MARKETING` — that is exactly
 `financial/classification`'s job, and duplicating any part of it here
 would create two places that could disagree about the same question. A
-`Row.Kind`/`Row.Status` (subtotal/total) is this package's own
-best-effort structural read, used only to populate
-`financial.RawLineItem` via `ToRawLineItems()`; `financial/classification`
-still runs its own independent structural detection over the resulting
-labels (see that package's `structuralTotalTokens`), and the two are not
-required to agree in every case — a label like `"Gross Profit"` is
-recognized as a subtotal by `ingestion`'s label-shape detection but not by
-`financial/classification`'s narrower total/subtotal/net token check,
-since `RawLineItem` carries no field for ingestion's structural read to
-travel on. This is a known, documented gap — see
-[Known deterministic ingestion gaps](#known-deterministic-ingestion-gaps).
+`Row.Kind`/`Row.Status` is this package's own best-effort structural read;
+`ToRawLineItems()` carries `Row.Kind` forward onto
+`financial.RawLineItem.Kind` (a `financial.RowKind` — see
+[`financial`](#financial) below) for every row, including headings, which
+now survive `ToRawLineItems()` instead of being dropped.
+`financial/classification.Classify` reads `RawLineItem.Kind` **first**: a
+non-zero `Kind` (heading/subtotal/total) wins outright, and only when it is
+the zero value does `Classify` fall back to its own narrower label-token
+heuristic (`structuralTotalTokens`). This means `ingestion` and
+`financial/classification` can no longer silently disagree about a row's
+structural role — a label like `"Gross Profit"`, recognized as a subtotal
+by `ingestion`'s label-shape detection (`ClassifyRowKind`) but not by
+`financial/classification`'s own narrower total/subtotal/net token check,
+now resolves consistently because ingestion's read reaches classification
+directly via `Kind`. This was a known, documented gap in earlier revisions
+of this README (see the "Gross Profit" case history removed from
+[Known deterministic ingestion gaps](#known-deterministic-ingestion-gaps)
+below) and is now closed.
 
 **CSV support.** Comma, semicolon, and tab delimiters (auto-detected by
 counting occurrences on the first line, or forced via `Options.Delimiter`);
@@ -355,15 +401,20 @@ a section header like `"Operating Expenses"`), `subtotal`/`total` (label
 starts with `"total"`/`"subtotal"`, or is a recognized whole-statement
 total phrase like `"Net Income"`/`"Total Assets"`), or `normal`. Blank rows
 are always excluded from `Result.Rows` (their `RowIndex` is never
-renumbered around them, so source position stays traceable); heading rows
-are retained in `Result.Rows` for context but excluded from
-`ToRawLineItems()`, since `financial.RawLineItem` has no field to
-represent "this row is a section heading." `Row.ParentLabel` tracks the
-innermost currently-open heading section using a simple indent-aware stack
-(`ParentTracker`): a heading row opens a section at its indent level, a
-subtotal/total row at or below that level closes it, and every other row
-inherits the innermost open section's label — see the `IndentLevel` field
-for the (deliberately coarse) whitespace-based signal this is built on.
+renumbered around them, so source position stays traceable). Heading rows
+are retained in `Result.Rows` **and** included in `ToRawLineItems()` output
+(as of `financial.RawLineItem` gaining a `Kind` field — see
+[`financial`](#financial) below): a heading becomes a `RawLineItem` with
+`Kind = financial.RowKindHeading` and empty `Values`, so a caller can
+display section headings from the same `[]financial.RawLineItem`/
+`[]financial.MappedLineItem` slices it already has, without separately
+keeping `Result.Rows` around and re-correlating by `RowID`.
+`Row.ParentLabel` tracks the innermost currently-open heading section using
+a simple indent-aware stack (`ParentTracker`): a heading row opens a
+section at its indent level, a subtotal/total row at or below that level
+closes it, and every other row inherits the innermost open section's label
+— see the `IndentLevel` field for the (deliberately coarse) whitespace-based
+signal this is built on.
 
 **Security and limits.** Every parser treats its input as untrusted:
 macros are never executed (`encoding/csv` and excelize implement no
@@ -400,12 +451,18 @@ skipped blank rows. A future application attaching persistent database IDs
 does so on top of this, not instead of it.
 
 **Integration with classification.** `Result.ToRawLineItems()` converts
-every non-heading, non-blank row into a `financial.RawLineItem`, ready for
-`classification.ClassifyBatch` exactly as shown in the diagram above; see
+every non-blank row (including headings — see above) into a
+`financial.RawLineItem`, ready for `classification.ClassifyBatch` exactly
+as shown in the diagram above; see
 [`ingestion/integration_test.go`](ingestion/integration_test.go) for the
 full chain exercised against real fixtures, through
 `financial.Normalize`, and (for the balance sheet fixture) into
-`financial/reconciliation`.
+`financial/reconciliation` — including
+`TestStructuralContract_LabelsSurviveAsStructuralNotOrdinaryAccounts`,
+which proves "Gross Profit", "Total Operating Expenses", "Net Income", and
+"Total Assets" all resolve to `classification.SourceStructural` (never an
+ordinary account code) and never appear in the normalized
+`FinancialDataset`, across both the CSV and XLSX adapters.
 
 **Fixture corpus** (`ingestion/fixtures`): a QuickBooks-style P&L
 (`quickbooks_pl.csv`, nested Income/COGS/Expense sections with a Gross
@@ -424,11 +481,292 @@ totals/subtotals with indentation (`totals_subtotals.xlsx`). No proprietary
 or customer data is used anywhere in the corpus.
 
 **Explicit non-goals**, matching this repository's constraints exactly:
-no PDF parsing, no OCR, no LLM/AI interpretation or ML classification
-(statement-type/period/structural detection are 100% rule-based, same as
+no OCR, no LLM/AI interpretation or ML classification (statement-type/
+period/structural detection are 100% rule-based, same as
 `financial/classification`), no database persistence, no file-upload HTTP
 endpoints, no frontend, no QuickBooks/Xero API integration, no automatic
 add-back/adjustment recommendations, no external financial-data sources.
+Text-based PDF ingestion is covered separately below — see
+[`ingestion/pdf`](#ingestionpdf).
+
+### `ingestion/pdf`
+
+Deterministic ingestion of **text-based (born-digital) PDF** financial
+statements — PDFs with an actual embedded text layer, as virtually every
+PDF exported directly from accounting software, Excel, or a word processor
+has. This is explicitly **not OCR**: a PDF with no usable embedded text
+(an image-only or scanned statement) returns an `OCR_REQUIRED` error
+rather than attempting any image-understanding step — see
+[OCR-required detection](#ocr-required-detection) below.
+
+```
+PDF bytes/io.Reader
+   ↓
+pdf.Parse
+   ↓
+pdf.Results{ Statements []ingestion.Result, ... }
+   ↓ (one Result per detected statement — see Multiple statements below)
+Result.ToRawLineItems()
+   ↓
+RawLineItem[]
+   ↓
+Classification      (financial/classification)
+   ↓
+User Confirmation   (future application)
+   ↓
+Normalize           (financial)
+```
+
+**PDF dependency.** [`github.com/ledongthuc/pdf`](https://github.com/ledongthuc/pdf)
+(pinned at the version recorded in `go.mod`/`go.sum`), **BSD-3-Clause**
+license — a pure-Go, dependency-free PDF reader (a maintained fork of the
+archived `rsc.io/pdf`, itself originally written by The Go Authors). It
+was verified directly (not merely assumed from its documentation) to
+expose usable per-glyph X/Y-positioned text before being adopted: a small
+hand-constructed PDF with a proper font `/Widths` array was parsed and its
+`Page.Content().Text` confirmed to return correct, monotonically advancing
+per-character X positions and stable per-line Y positions, which this
+package's row/column reconstruction (below) depends on. The dependency is
+isolated entirely behind `ingestion/pdf`: no `ledongthuc/pdf` type appears
+in any exported `ingestion/pdf` API (see `extract.go`, the only file in
+this package that imports it). It implements no JavaScript engine, no
+hyperlink/attachment/launch-action execution, and no macro/VBA runtime —
+it is a structural/content-stream reader only, so unlike a full-featured
+PDF viewer there is no such execution surface to disable in the first
+place. `ledongthuc/pdf` uses panic-based internal error handling for
+malformed object graphs (some inherited from its `rsc.io/pdf` ancestry);
+`ingestion/pdf` wraps every call into it with its own `recover()` (see
+`extract.go`), converting any panic into an `INVALID_FILE` error, so a
+malicious or corrupt PDF can never crash the calling process.
+
+**Positioned-text extraction.** `ledongthuc/pdf`'s `Page.Content()`
+returns one `Text` primitive per glyph/short run — page, X, Y, font,
+font size, and advance width — not one primitive per word or line (a PDF
+content stream has no inherent concept of either; see `extract.go`).
+Extraction order is never assumed to equal visual reading order: every
+fragment carries its own absolute page-relative X/Y, and reconstruction
+(below) sorts and groups from there.
+
+**Row reconstruction** (`layout.go`). Two stages: (1) **word grouping** —
+adjacent same-line fragments are merged into words when their horizontal
+gap is under 30% of the font size (`defaultWordGapFactor`), splitting on
+any larger gap; (2) **row grouping** — words are clustered into lines by
+Y-proximity within `Options.RowYTolerance` (default 2.0 points —
+`defaultRowYTolerance` — chosen to absorb the sub-point Y jitter real PDF
+producers introduce between glyphs on one nominal baseline, while staying
+well under any realistic line-to-line spacing). Left-to-right order within
+a line is preserved via an X sort, independent of extraction order.
+
+**Column reconstruction** (`columns.go`). Column boundaries are never
+assumed at fixed X coordinates: when a recognizable period-header line
+exists (reusing `ingestion/internal/tabular.ParsePeriodLabel` per
+candidate word — never a separate reimplementation), its own word X
+positions anchor the columns directly; otherwise, boundaries are inferred
+by greedily clustering every word's start-X across the whole section, with
+a gap threshold of 300% of the dominant font size
+(`defaultColumnGapFactor`) separating genuinely different columns from the
+natural X variance of right-aligned numbers with differing digit counts. A
+multi-word label (e.g. "Total Operating Expenses" split into three words
+by row reconstruction) reassembles into one grid cell because every word
+composing it falls within the label column's X region.
+
+**Multi-page statements.** A statement's rows continue across pages
+seamlessly — `Row.ParentLabel` section context (via
+`ingestion/internal/tabular.ParentTracker`, unmodified) survives a page
+break exactly as it survives any other row transition, and every row
+carries its exact source `PageIndex`. Repeated page headers/column
+headings (a title or period-header block reprinted at the top of every
+page) are detected by exact text match against an earlier line in the
+same section and suppressed (`REPEATED_HEADER_REMOVED`), never becoming
+duplicate rows. A page-footer/page-number line (`"Page 3"`, `"Page 3 of
+12"`, a bare number) positioned in a page's bottom margin is dropped
+silently (`repeated.go`'s `looksLikePageFooter`) — never flagged as a
+warning, since it was never financial content to begin with.
+
+**Multiple statements per PDF — Option A.** A single PDF commonly
+contains more than one statement (e.g. an income statement followed by a
+balance sheet in one filing). `pdf.Parse` never silently combines them:
+it returns `pdf.Results{ Statements []ingestion.Result }`, one `Result`
+**per detected statement section**, each independently statement-typed —
+a caller never needs a second call or an option to get every statement
+out, and a single-statement PDF is simply the same shape with
+`len(Statements) == 1`. Boundaries are detected from deterministic
+signals only (`detect.go`'s `splitSections`): a short, title-shaped line
+matching a *different* statement type than the currently open section
+starts a new one (a REPEATED occurrence of the *same* type, e.g. a title
+reprinted per page, does not); an unusually large vertical gap on the same
+page with no confirming keyword signal on either side also splits, but is
+flagged `STATEMENT_BOUNDARY_AMBIGUOUS` since no evidence confirms it is
+genuinely a different statement rather than a visual section break within
+one. `MULTIPLE_STATEMENTS_DETECTED` is emitted at the document level
+whenever more than one section results. Leading preamble text (e.g. a
+company-name line before the actual "Income Statement" title line) is
+folded into the section that follows it, never treated as its own
+statement.
+
+**Statement/period/numeric reuse — no reimplementation.** Every bit of
+header-row detection, period parsing, statement-type detection, and
+structural row classification is driven through the exact same
+`ingestion.BuildResult` entry point `ingestion/csv` and `ingestion/xlsx`
+already call (`build.go`): once a section's lines are reshaped into a
+`tabular.Grid` (the identical `[][]string` shape both other formats
+produce), this package has zero further statement-interpretation logic of
+its own. The only genuinely PDF-specific work is (1) getting from
+positioned glyphs to a `Grid` in the first place (extraction/layout/column
+reconstruction, above) and (2) a small set of documented PDF
+extraction-quirk accommodations layered strictly ahead of the existing
+parsers, never replacing them:
+
+- **Numeric parsing** (`numeric.go`): `"$ 1,234.00"` (spaced currency
+  prefix), `"( 1,234 )"` (spaced parentheses), `"1,234 -"` (a trailing
+  minus sign separated from the digits by a gap — rewritten to the
+  leading-minus form `tabular.ParseNumeric` already understands), and
+  `"1 234"` (space-thousands separator, anchored so it never matches
+  running text) are all normalized to the exact form
+  `ingestion/internal/tabular.ParseNumeric` already parses correctly,
+  before handing off to that unmodified function. A value not matching
+  one of these four documented patterns is passed through completely
+  untouched — this package can never mask a genuinely malformed value;
+  it fails exactly as CSV/XLSX would, reported as `UNPARSEABLE_PDF_VALUE`
+  (distinct from `UNPARSEABLE_NUMERIC_CELL` specifically for a cell that
+  needed PDF normalization and still failed afterward, so a caller can
+  tell "malformed in the source" apart from "a PDF-extraction-layout
+  ambiguity").
+- **Indentation** (`build.go`): rather than a parallel X-offset-based
+  indent algorithm, a label word's X-offset from the section's baseline
+  label X is converted into synthetic leading spaces (one indent step —
+  150% of the dominant font size — per 2 spaces), so
+  `ingestion/internal/tabular.DetectIndentLevel` (which reads leading
+  whitespace — the same signal XLSX cell text already carries) runs
+  completely unmodified for PDF's X-offset indentation too.
+
+**Structural detection.** Heading/subtotal/total rows are detected via
+`ClassifyRowKind` exactly as for CSV/XLSX (same label-shape rules,
+running on the same reconstructed `Grid`) — see
+[Structural row contract](#structural-row-contract-financialrowkind)
+below and `financial/classification`'s `RawLineItem.Kind`-first
+precedence, which this package benefits from identically to CSV/XLSX with
+no PDF-specific code.
+
+**OCR-required detection.** A PDF is treated as having no usable text
+layer — returning a fatal `OCR_REQUIRED` `*ingestion.Error`, never an
+empty-but-successful result — when EITHER: zero text fragments are
+extracted across the whole document; OR the total extracted fragment
+count is below `minTextFragmentsForUsableDocument` (20 — a real
+single-page statement, even a very short one, produces comfortably more
+than this from its title and a handful of line items alone); OR the
+average fragment count per page is below `minFragmentsPerPageRatio` (3.0).
+Both thresholds are deliberately conservative in the direction of never
+false-triggering on a real, if sparse, text document. A page that
+produces zero text within an otherwise-usable document (e.g. one scanned
+exhibit page inserted into a normal text statement) does not fail the
+whole parse — it is reported per-page as `PDF_TEXT_LAYER_MISSING` instead.
+`ingestion/pdf` never attempts OCR under any circumstance; this is a
+hard, permanent boundary, not a "not implemented yet."
+
+**PDF-specific security/limits.** `ingestion.Limits` gained three
+additive PDF-only fields (zero value = the `DefaultLimits()` default,
+identical pattern to every existing limit): `MaxPages` (default 500 —
+exceeding it is a fatal `PDF_PAGE_LIMIT_EXCEEDED`, never a silent partial
+read that could drop financial rows), `MaxTextFragments` (default
+2,000,000, bounding parser work against a pathologically dense or
+maliciously crafted PDF), and `MaxTextLengthPerPage` (default 200,000
+runes). Both text limits fail as `PDF_TEXT_LIMIT_EXCEEDED`. As documented
+above under PDF dependency, `ledongthuc/pdf` implements no JavaScript,
+hyperlink/launch-action, embedded-file, or macro execution of any kind —
+confirmed directly from its source, not assumed — so there is no such
+surface for this package to additionally disable. External workbook-style
+links have no PDF equivalent to follow. Every parse wraps
+`ledongthuc/pdf` calls in `recover()` (see PDF dependency above) so a
+malformed/malicious PDF can only ever produce a clean `INVALID_FILE`
+error, never a crash.
+
+**Options.** `pdf.Options` embeds `ingestion.Options` for every field
+shared with CSV/XLSX (`Locale`, `DashTreatment`, `Limits`,
+`PeriodColumnOverrides`, `LabelColumnOverride`, `HeaderRowOverride`,
+`StatementTypeOverride`, etc. — reused directly, not duplicated) and adds
+three PDF-only fields: `PageStart`/`PageEnd` (1-based, inclusive,
+restricts extraction to a page range) and `RowYTolerance` (see Row
+reconstruction above). Auto-detection remains the default for everything;
+these are all opt-in overrides, matching the CSV/XLSX `Options`
+philosophy exactly. A `StatementSection`-style option was deliberately
+NOT added: Option A already returns every detected statement from a
+single call, so there is nothing such an option would select.
+
+**Warning and error taxonomy — extended, not duplicated.** New stable
+`WarningCode` values (added to the *same* `ingestion.WarningCode`
+taxonomy CSV/XLSX already use, per this repository's one-taxonomy
+discipline): `PDF_TEXT_LAYER_MISSING`, `PDF_LAYOUT_AMBIGUOUS` (row
+reconstruction found no clean line grouping — most lines in a section
+reconstructed as a single word), `MULTIPLE_STATEMENTS_DETECTED`,
+`STATEMENT_BOUNDARY_AMBIGUOUS`, `COLUMN_ALIGNMENT_AMBIGUOUS` (column
+reconstruction produced an unusually sparse grid), `REPEATED_HEADER_REMOVED`,
+`UNPARSEABLE_PDF_VALUE`. New `ErrorCode` values (same `ingestion.ErrorCode`
+taxonomy): `OCR_REQUIRED`, `PDF_PAGE_LIMIT_EXCEEDED`,
+`PDF_TEXT_LIMIT_EXCEEDED`. `ingestion.Row` gained `PageIndex int` (always 0
+for CSV/XLSX) and `ingestion.Cell` gained an optional `Bounds *CellBounds`
+(nil for CSV/XLSX, and nil for any PDF cell this package could not
+confidently attribute a single bounding box to).
+
+**Fixture corpus** (`ingestion/fixtures`, generated by
+`ingestion/fixtures/gen` alongside the existing XLSX generator — see that
+package's `pdf_writer.go` for why a small hand-rolled PDF writer was used
+instead of a second PDF-writing dependency: this fixture corpus needs
+nothing beyond positioned Helvetica text across one or more pages, which
+a few hundred lines of deterministic code produce exactly as reliably as
+a full library, at zero added dependency cost):
+`simple_pl.pdf` (one-page income statement), `multi_year_pl.pdf`
+(three period columns), `multi_page_pl.pdf` (two pages, repeated
+title/header block on page 2, parent context spanning the page break),
+`balance_sheet.pdf` (nested asset/liability/equity sections with
+subtotals and a grand total), `pl_and_balance_sheet.pdf` (an income
+statement and a balance sheet in one two-page PDF — the Option A
+multi-statement fixture), `negative_parentheses.pdf` (including the
+"( 1,234 )" spaced-parentheses extraction quirk),
+`indented_sections.pdf` (X-offset indentation under a heading),
+`unusual_spacing.pdf` (every documented numeric extraction quirk at
+once), `image_only.pdf` (zero text objects — only a drawn rectangle — for
+OCR-required-detection testing; a real scanned-looking raster image is
+unnecessary since the trigger is "no usable extractable text," which a
+text-free content stream demonstrates just as validly and far more
+deterministically), and `ambiguous_layout.pdf` (scattered text with no
+discernible row/column alignment, for `PDF_LAYOUT_AMBIGUOUS`/
+`COLUMN_ALIGNMENT_AMBIGUOUS`). No proprietary or customer data anywhere in
+the corpus, matching the CSV/XLSX corpus's identical constraint.
+
+**Known PDF-specific limitations**, in the same spirit as
+[Known deterministic ingestion gaps](#known-deterministic-ingestion-gaps)
+below:
+
+- **Fixed-width/monospace or unusual embedded fonts with no `/Widths`
+  array can degrade per-character X positioning.** `ledongthuc/pdf`'s
+  `Font.Width()` reads only an explicit `/Widths` array and does not fall
+  back to built-in AFM metrics for an unembedded base-14 font; this was
+  confirmed directly during this package's own dependency evaluation (see
+  PDF dependency above). Virtually every real-world PDF producer
+  (accounting software, Excel, word processors, "Print to PDF") embeds
+  `/Widths` explicitly, so this is a narrow edge case in practice, but a
+  PDF from an unusual producer that omits it could see word-grouping
+  degrade.
+- **Merged/rotated/vertical text, and multi-row (wrapped) headers, are
+  not specifically handled** — same limitation CSV/XLSX already document
+  for wrapped headers, inherited here since header handling reuses the
+  identical `ingestion.BuildResult` logic.
+- **A statement laid out as true side-by-side columns spanning the full
+  page width with no shared period header** (rare in practice; most
+  multi-column financial statements share one header row) relies entirely
+  on `clusterColumnXs`'s gap-based inference, which is less certain than
+  header-anchored column detection — `COLUMN_ALIGNMENT_AMBIGUOUS` is the
+  signal to watch for here.
+- **Tables with visible ruling lines (drawn rectangles/lines as cell
+  borders) are not used as a column-boundary signal** — only text
+  positioning drives reconstruction; a ruled table with unusual text
+  spacing that doesn't align with its own ruling lines could reconstruct
+  less accurately than the ruling would suggest.
+- **Locale is inherited from CSV/XLSX's single supported value
+  (`LocaleEnUS`)** — a European-formatted PDF (`.` thousands, `,`
+  decimal) is out of scope for the same reason it already is for
+  CSV/XLSX (see Known deterministic ingestion gaps below).
 
 ### `financial`
 
@@ -529,6 +867,75 @@ that classification logic (rules-based, ML-based, or otherwise) can evolve
 independently as a separate module that simply needs to produce
 `[]MappedLineItem`.
 
+#### Structural row contract (`financial.RowKind`)
+
+`RowKind` (a new string type: `""`/`RowKindNormal` (zero value),
+`"heading"`/`RowKindHeading`, `"subtotal"`/`RowKindSubtotal`,
+`"total"`/`RowKindTotal` — no `BLANK` value; a genuinely blank row never
+becomes a `RawLineItem` at all, see [`ingestion`](#ingestion)) is a field
+on both `RawLineItem` and `MappedLineItem` (`Kind RowKind`, `json:"kind,
+omitempty"`) carrying an **upstream structural read** from whichever
+adapter produced the row — distinct from `RowStatus`, which remains
+exactly what it always was: the *normalize-time* directive
+(`Normalize` already knows nothing new was needed here; it still switches
+on `Status`, never on `Kind`).
+
+**Zero-value semantics.** `RowKindNormal` is the empty string, so it is
+both the Go zero value and omitted from JSON entirely
+(`omitempty`) — a `RawLineItem` built by an existing caller that never
+sets `Kind` (including a bare `RawLineItem{}`, as most of this
+repository's own tests construct) behaves in classification exactly as it
+did before this field existed: `financial/classification.Classify` falls
+back to its own pre-existing label-based heuristic. This is the field's
+entire backward-compatibility guarantee, and it is what closes the
+"Gross Profit" gap without changing behavior for anyone who never
+populates the field.
+
+**Precedence.** `Classify`'s structural-detection stage (still stage 1 of
+its pipeline — unchanged in position, only smarter) now checks
+`RawLineItem.Kind` **first**. A non-zero `Kind` — supplied by an adapter
+that has already done a better structural read than a bare label-token
+check can (e.g. `ingestion`'s `ClassifyRowKind`, which recognizes "Gross
+Profit" as a subtotal from label shape alone) — wins outright and skips
+the label heuristic entirely. Only when `Kind` is the zero value does
+`Classify` fall back to `structuralTotalTokens`
+(`"total"`/`"subtotal"`/`"net"`), exactly as before. A `RowKindHeading`
+row resolves to `Status = RowStatusIgnored` (a heading is not a subtotal
+or total — it simply carries no financial amount — and `Normalize`
+already excludes `ignored` rows from aggregation, so no code change was
+needed there); `RowKindSubtotal`/`RowKindTotal` resolve to the
+corresponding `RowStatus` directly.
+
+**Heading rows now survive ingestion.** `ingestion.Result.ToRawLineItems()`
+used to drop `StructuralHeading` rows entirely, since `RawLineItem` had no
+field to represent "this is a section heading." It no longer does: a
+heading becomes a `RawLineItem` with `Kind = RowKindHeading` and empty
+`Values`, flows through classification (`SourceStructural`,
+`RowStatusIgnored`), and lands on the resulting `MappedLineItem` — so a
+caller (e.g. a future review UI) can now display section headings
+straight from the same `[]RawLineItem`/`[]MappedLineItem` slices it
+already has, instead of separately keeping `ingestion.Result.Rows` around
+and re-correlating by `RowID`. Only genuinely blank rows (no text
+anywhere) are still excluded from `RawLineItem` — `RowKind` has no
+`BLANK` value, per the original task brief's explicit guidance that blank
+rows do not need to become `RawLineItem`s.
+
+**Regression coverage.** JSON round-trip tests exist for `Kind` on both
+`RawLineItem` and `MappedLineItem` (including the zero-value-omitted
+case), in [`financial/types_test.go`](financial/types_test.go). A
+dedicated end-to-end regression,
+`TestStructuralContract_LabelsSurviveAsStructuralNotOrdinaryAccounts` in
+[`ingestion/integration_test.go`](ingestion/integration_test.go), proves
+"Gross Profit", "Total Operating Expenses", "Net Income", and "Total
+Assets" all resolve to `SourceStructural` (never an ordinary account
+code) and never appear in a normalized `FinancialDataset`, across CSV,
+XLSX, and (see [`ingestion/pdf`](#ingestionpdf)) PDF. A separate
+backward-compatibility regression,
+`TestRegression_OnlyKindChangedForPreExistingRows`, re-runs an existing
+CSV fixture and asserts every row that was already present before this
+field existed is unchanged in every OTHER field, with the only new rows
+being the previously-dropped headings.
+
 ### `financial/classification`
 
 The missing piece between raw source data and `financial.Normalize`:
@@ -553,11 +960,17 @@ statistical estimate; nothing here is trained on data.
 **Classification precedence.** `Classify` runs a fixed pipeline and takes
 the first stage that produces a match:
 
-1. **structural detection** — is the label a total/subtotal row (e.g.
-   "Total Operating Expenses", "Net Income")? If so, no code is proposed,
-   `Status` is set to `subtotal`/`total`, and every other stage is skipped
-   entirely — even if an alias exists for that exact label — since
-   aggregation correctness for totals matters more than classifying them.
+1. **structural detection** — is this row a heading/subtotal/total rather
+   than an ordinary account? This checks `RawLineItem.Kind` first — a
+   non-zero `Kind` supplied by the row's originating adapter (e.g.
+   `ingestion`'s label-shape-based structural detection) wins outright;
+   only when `Kind` is the zero value does this stage fall back to its own
+   label heuristic (e.g. "Total Operating Expenses", "Net Income"). If the
+   row is structural, no code is proposed, `Status` is set to
+   `subtotal`/`total` (or `ignored` for a heading — see below), and every
+   other stage is skipped entirely — even if an alias exists for that exact
+   label — since aggregation correctness for totals matters more than
+   classifying them.
 2. **explicit mapping** — an exact `RawLineItem.ID` override in
    `Config.Explicits`. This is the human-review escape hatch: once someone
    has decided a specific row's code, nothing overrides it.
@@ -2411,10 +2824,19 @@ to map a domain failure to a UI/API response by code.
 ## Development
 
 ```bash
-gofmt -l .        # should print nothing
-go build ./...
+gofmt -w .        # should produce no diff on a clean tree
 go test ./...
 go vet ./...
+go build ./...
+go test -race ./...
+```
+
+Regenerate the binary CSV/XLSX/PDF fixtures (only needed when a fixture's
+shape changes — see [`ingestion/pdf`](#ingestionpdf)'s Fixture corpus for
+why PDF fixtures are hand-generated rather than checked-in-only):
+
+```bash
+go run ./ingestion/fixtures/gen
 ```
 
 ## Recommended next module
@@ -2456,15 +2878,17 @@ The next steps are integration, not new packages:
    historical records tied to its own account/client/valuation entities.
    This repository defines the shapes; it does not decide how they're
    stored.
-2. **Document parsing.** CSV/XLSX tabular ingestion is now covered by
-   `ingestion` (see [`ingestion`](#ingestion) above). Turning a scanned or
-   born-digital **PDF** financial statement into `[]financial.RawLineItem`
-   is still exactly the kind of OCR/document-understanding problem this
-   repository's "no PDF/OCR" constraint rules out — see
-   [Known deterministic ingestion gaps](#known-deterministic-ingestion-gaps)
-   and the recommendation immediately below for why PDF is the natural
-   next adapter once it's needed, and why it's deliberately not started
-   here.
+2. **Document parsing.** CSV/XLSX tabular ingestion and text-based
+   (born-digital) PDF ingestion are now covered by `ingestion` and
+   `ingestion/pdf` (see [`ingestion`](#ingestion) and
+   [`ingestion/pdf`](#ingestionpdf) above). Turning a **scanned or
+   image-only PDF** into `[]financial.RawLineItem` is still exactly the
+   OCR/document-understanding problem this repository's "no OCR"
+   constraint rules out — `ingestion/pdf` already detects this case
+   deterministically and returns `OCR_REQUIRED` rather than guessing; see
+   [Recommended next phase: scanned/image PDF support (OCR)](#recommended-next-phase-scannedimage-pdf-support-ocr)
+   for why OCR is the natural next step once it's needed, and why it's
+   deliberately not started here.
 3. **HTTP/API and UI.** `report.Report` is JSON-serializable specifically
    so a future API handler can return it directly and a future Vue UI (or
    any other frontend) can render it — building either is explicitly out
@@ -2609,20 +3033,31 @@ revision or for a caller-side override (`Options.LabelColumnOverride`,
 `HeaderRowOverride`, `PeriodColumnOverrides`, `StatementTypeOverride`) to
 handle in the meantime:
 
-- **`ingestion`'s own structural read (`Row.Kind`/`Row.Status`) is not
-  binding on `financial/classification`.** `financial.RawLineItem` has no
-  field for ingestion's subtotal/total/heading determination to travel on,
-  so `ToRawLineItems()` only uses it to decide which rows to include/
-  exclude; `classification.Classify` re-derives structural status from the
-  label text independently once the row reaches it (see the `ingestion`
-  section above). The two mostly agree because both use a "total"/
-  "subtotal"/"net"-token heuristic, but not always — `"Gross Profit"` is a
-  documented example where ingestion's broader label-shape detection
-  recognizes a subtotal that classification's narrower token check does
-  not. A future revision could add a `RawLineItem.HintStatus` (or similar)
-  optional field that classification's structural stage consults before
-  falling back to its own detection, closing this gap without either
-  package needing to duplicate the other's rules.
+- ~~`ingestion`'s own structural read (`Row.Kind`/`Row.Status`) is not
+  binding on `financial/classification`~~ — **resolved.** `financial.
+  RawLineItem` and `financial.MappedLineItem` now carry a `Kind
+  financial.RowKind` field (`""`/normal, `"heading"`, `"subtotal"`,
+  `"total"` — zero value `RowKindNormal`, `omitempty` in JSON).
+  `ToRawLineItems()` populates it from `Row.Kind`, and
+  `classification.Classify`'s structural-detection stage checks
+  `RawLineItem.Kind` **before** falling back to its own label-token
+  heuristic (`structuralTotalTokens`) — see
+  [`financial/classification`](#financialclassification) below. A non-zero
+  `Kind` from ingestion now wins outright, so `"Gross Profit"` (recognized
+  as a subtotal by ingestion's broader label-shape detection but not by
+  classification's narrower total/subtotal/net token check) resolves
+  consistently end to end. `Kind`'s zero value means "no upstream signal
+  supplied," so a hand-built `RawLineItem` (as most existing tests
+  construct) is completely unaffected and classification falls back to
+  exactly its pre-existing label heuristic — see
+  `TestClassify_GrossProfitWithoutKindFallsThroughToOrdinaryClassification`
+  in `financial/classification/classify_test.go`, which pins this fallback
+  behavior in place. As a consequence, heading rows (`Kind ==
+  RowKindHeading`) also now survive `ToRawLineItems()` instead of being
+  dropped, and `classification.Classify` maps a heading to
+  `RowStatusIgnored` (which `financial.Normalize` already excludes from
+  aggregation) rather than requiring the caller to have kept `Result.Rows`
+  around separately.
 - **Indentation-based parent/section detection depends on the source
   preserving leading whitespace**, which plain CSV frequently does not
   (many spreadsheet-to-CSV exporters strip it) while XLSX cell text
@@ -2654,22 +3089,36 @@ handle in the meantime:
   excelize style lookups through `ingestion/internal/tabular`, which
   currently has zero XLSX-specific knowledge by design.
 
-## Recommended next adapter
+**PDF-specific known limitations** are documented separately in
+[`ingestion/pdf`](#ingestionpdf)'s own "Known PDF-specific limitations"
+subsection, to keep PDF-only detail out of this CSV/XLSX-focused list.
 
-With CSV and XLSX both covered, the next natural input adapter — and the
-one every remaining realistic financial-statement source funnels through —
-is **PDF**, explicitly out of scope for this repository per
+## Recommended next phase: scanned/image PDF support (OCR)
+
+With CSV, XLSX, and text-based PDF all covered, the one remaining
+realistic financial-statement source this repository does not read is a
+**scanned or image-only PDF** — one with no embedded text layer at all,
+which [`ingestion/pdf`](#ingestionpdf) already detects deterministically
+and reports as `OCR_REQUIRED` (see that section) rather than guessing.
+Closing this gap requires OCR, which is explicitly out of scope for this
+repository per
 [What this project intentionally does not contain](#what-this-project-intentionally-does-not-contain):
-a born-digital PDF (text layer already present) is a fundamentally
-different, much harder extraction problem than CSV/XLSX (no reliable
-row/column grid to begin from at all — layout must be reconstructed from
-absolute-positioned text runs), and a scanned PDF requires OCR, which
-introduces exactly the non-deterministic, model-based uncertainty this
+OCR introduces exactly the non-deterministic, model-based uncertainty this
 repository's entire design has been structured to avoid. Should a future
-module take this on, it should preserve the same boundary `ingestion`
-established here: PDF-specific extraction stays isolated in its own
-package (e.g. `ingestion/pdf`), produces the same `ingestion.Result`/
-`Row`/`Cell` shapes this package already defines rather than a competing
-model, and still performs zero classification of its own — every row it
-extracts flows into the exact same `financial/classification` boundary
-CSV and XLSX rows do today.
+module take this on, it should preserve the same boundary `ingestion` and
+`ingestion/pdf` established here: OCR-derived text extraction stays
+isolated in its own package (a natural home would be alongside or inside
+`ingestion/pdf`, since it would still need to feed the exact same
+row/column reconstruction — `layout.go`/`columns.go` — this package
+already implements once text exists, rather than reimplementing that
+logic a second time), produces the same `ingestion.Result`/`Row`/`Cell`
+shapes this package already defines rather than a competing model, and
+still performs zero classification of its own — every row it extracts
+flows into the exact same `financial/classification` boundary CSV, XLSX,
+and text-PDF rows do today. Whatever OCR engine is chosen will be the
+first genuinely non-deterministic component in this repository's
+ingestion layer (image-to-text is inherently probabilistic, unlike
+everything documented above it), so it should be treated as a distinct
+trust boundary from day one — e.g. surfacing OCR confidence scores
+per-row rather than presenting OCR output with the same
+"deterministic and explainable" guarantee the rest of `ingestion` offers.

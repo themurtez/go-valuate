@@ -107,14 +107,23 @@ type Result struct {
 	// Label is the source row's original, unmodified label.
 	Label string `json:"label"`
 	// Code is the proposed canonical taxonomy code. Empty when Status is
-	// RowStatusSubtotal or RowStatusTotal (no code is proposed for
-	// structural rows) or when the row is SourceUnknown.
+	// RowStatusIgnored, RowStatusSubtotal, or RowStatusTotal (no code is
+	// proposed for structural rows) or when the row is SourceUnknown.
 	Code financial.Code `json:"code,omitempty"`
 	// Status is the row status this result recommends for the eventual
-	// financial.MappedLineItem: normal, subtotal, or total. Classify never
-	// produces RowStatusIgnored; a caller wanting to ignore specific rows
-	// does so after inspecting the Result.
+	// financial.MappedLineItem: normal, subtotal, total, or ignored.
+	// Classify produces RowStatusIgnored only for a heading row
+	// (raw.Kind == financial.RowKindHeading) — a heading is not a subtotal
+	// or total, it simply carries no financial amount at all, so
+	// RowStatusIgnored is the correct normalize-time directive for it (see
+	// financial.Normalize, which already skips RowStatusIgnored rows). For
+	// every other row, a caller wanting to ignore it does so after
+	// inspecting the Result.
 	Status financial.RowStatus `json:"status"`
+	// Kind carries forward raw.Kind (the upstream structural read), for
+	// provenance/display. Classification does not branch on this field for
+	// any row other than the one it was copied from; see RawLineItem.Kind.
+	Kind financial.RowKind `json:"kind,omitempty"`
 	// Confidence is the heuristic strength of Code, in [0, 1]. See
 	// Confidence's doc comment: this is not a statistical probability.
 	Confidence Confidence `json:"confidence"`
@@ -164,6 +173,7 @@ func (r Result) ToMappedLineItem(raw financial.RawLineItem) financial.MappedLine
 		StatementType: raw.StatementType,
 		Code:          r.Code,
 		Status:        r.Status,
+		Kind:          r.Kind,
 		Values:        values,
 	}
 }

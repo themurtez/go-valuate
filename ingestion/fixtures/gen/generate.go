@@ -1,12 +1,15 @@
-// Command generate builds the binary XLSX fixtures under ingestion/fixtures
-// from code, since XLSX is a binary zip-based format unsuitable for hand
-// authoring or diffing as text. Run with:
+// Command generate builds the binary XLSX and PDF fixtures under
+// ingestion/fixtures from code, since both are binary formats unsuitable
+// for hand authoring or diffing as text. Run with:
 //
 //	go run ./ingestion/fixtures/gen
 //
 // Regenerate whenever a fixture's shape needs to change; the fixtures
 // themselves are checked in so tests don't depend on this generator at
-// test time.
+// test time. XLSX fixtures are built with github.com/xuri/excelize/v2
+// (already a project dependency via ingestion/xlsx); PDF fixtures are
+// built with a small hand-rolled writer (pdf_writer.go) rather than a
+// second PDF-writing dependency — see that file's doc comment.
 package main
 
 import (
@@ -26,6 +29,7 @@ func main() {
 	must(writeMultiSheetWorkbook(filepath.Join(dir, "multi_sheet_workbook.xlsx")))
 	must(writeAmbiguousWorkbook(filepath.Join(dir, "ambiguous_workbook.xlsx")))
 	must(writeTotalsSubtotalsWorkbook(filepath.Join(dir, "totals_subtotals.xlsx")))
+	must(generatePDFFixtures(dir))
 
 	fmt.Println("fixtures generated")
 }

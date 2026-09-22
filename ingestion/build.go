@@ -286,6 +286,25 @@ func structuralKindToStatus(k StructuralKind) financial.RowStatus {
 	}
 }
 
+// structuralKindToRowKind maps a Row's StructuralKind to the
+// financial.RowKind carried on RawLineItem.Kind by ToRawLineItems. Unlike
+// structuralKindToStatus, StructuralBlank has no meaningful mapping here —
+// blank rows never reach ToRawLineItems at all (see that method), so
+// StructuralBlank falls into the same default case as StructuralNormal,
+// which is never actually exercised for a blank row in practice.
+func structuralKindToRowKind(k StructuralKind) financial.RowKind {
+	switch k {
+	case StructuralHeading:
+		return financial.RowKindHeading
+	case StructuralSubtotal:
+		return financial.RowKindSubtotal
+	case StructuralTotal:
+		return financial.RowKindTotal
+	default:
+		return financial.RowKindNormal
+	}
+}
+
 func detectStatement(in BuildInput, grid tabular.Grid, headerRow int) (financial.StatementType, bool, string) {
 	if in.Opts.StatementTypeOverride != StatementOverrideNone {
 		switch in.Opts.StatementTypeOverride {

@@ -37,6 +37,7 @@ type Format string
 const (
 	FormatCSV  Format = "csv"
 	FormatXLSX Format = "xlsx"
+	FormatPDF  Format = "pdf"
 )
 
 // DashTreatment controls how a bare dash/em-dash cell ("-", "—", "--") is
@@ -106,17 +107,44 @@ type Limits struct {
 	// cell's text. Longer values are truncated and a warning is emitted
 	// (see WarnCellTextTruncated). 0 means DefaultLimits.MaxCellTextLength.
 	MaxCellTextLength int
+	// MaxPages caps the number of pages ingestion/pdf will read from a PDF
+	// document. Ignored by CSV/XLSX. 0 means DefaultLimits.MaxPages. A
+	// document with more pages than this is a fatal ErrCodeLimitExceeded
+	// (PDF_PAGE_LIMIT_EXCEEDED), not silently truncated, since a partial
+	// read of a multi-page statement could silently drop financial rows.
+	MaxPages int
+	// MaxTextFragments caps the number of positioned-text fragments (see
+	// ingestion/pdf's extraction doc comment — roughly one per glyph/run,
+	// well below one per word) ingestion/pdf will extract across the whole
+	// document before giving up, bounding parser work against a
+	// pathologically dense or maliciously crafted PDF. Ignored by
+	// CSV/XLSX. 0 means DefaultLimits.MaxTextFragments. Exceeding this is a
+	// fatal ErrCodeLimitExceeded (PDF_TEXT_LIMIT_EXCEEDED).
+	MaxTextFragments int
+	// MaxTextLengthPerPage caps the number of runes ingestion/pdf will
+	// retain from a single page's reconstructed text before giving up on
+	// that page. Ignored by CSV/XLSX. 0 means
+	// DefaultLimits.MaxTextLengthPerPage. Exceeding this is a fatal
+	// ErrCodeLimitExceeded (PDF_TEXT_LIMIT_EXCEEDED), distinct from
+	// MaxCellTextLength (which truncates a single reconstructed cell with a
+	// warning, not a fatal error — a whole page containing far more text
+	// than any real financial statement page plausibly has is instead
+	// treated as a resource-exhaustion signal worth refusing outright).
+	MaxTextLengthPerPage int
 }
 
 // DefaultLimits returns the conservative default Limits applied whenever a
 // caller-supplied Limits field is left at its zero value.
 func DefaultLimits() Limits {
 	return Limits{
-		MaxFileSizeBytes:  50 * 1024 * 1024, // 50 MiB
-		MaxSheets:         100,
-		MaxRows:           100_000,
-		MaxColumns:        500,
-		MaxCellTextLength: 4096,
+		MaxFileSizeBytes:     50 * 1024 * 1024, // 50 MiB
+		MaxSheets:            100,
+		MaxRows:              100_000,
+		MaxColumns:           500,
+		MaxCellTextLength:    4096,
+		MaxPages:             500,
+		MaxTextFragments:     2_000_000,
+		MaxTextLengthPerPage: 200_000,
 	}
 }
 
@@ -138,6 +166,15 @@ func (l Limits) withDefaults() Limits {
 	}
 	if l.MaxCellTextLength <= 0 {
 		l.MaxCellTextLength = d.MaxCellTextLength
+	}
+	if l.MaxPages <= 0 {
+		l.MaxPages = d.MaxPages
+	}
+	if l.MaxTextFragments <= 0 {
+		l.MaxTextFragments = d.MaxTextFragments
+	}
+	if l.MaxTextLengthPerPage <= 0 {
+		l.MaxTextLengthPerPage = d.MaxTextLengthPerPage
 	}
 	return l
 }
@@ -261,9 +298,12 @@ type DetectedPeriod struct {
 // StructuralKind classifies the structural role of a single row, as
 // distinct from financial.RowStatus: StructuralKind is the ingestion
 // layer's own best-effort read of row shape (including heading rows and
-// blank rows, neither of which financial.RowStatus represents), while
-// Row.Status carries the financial.RowStatus value classification/
-// normalization actually consume. See ToRawLineItem.
+// blank rows, neither of which financial.RowStatus represents on its own),
+// while Row.Status carries the financial.RowStatus value
+// classification/normalization actually consume. See ToRawLineItems and
+// structuralKindToRowKind, which translates StructuralKind into the
+// analogous financial.RowKind carried on RawLineItem.Kind (everything
+// except StructuralBlank, which never reaches RawLineItem at all).
 type StructuralKind string
 
 const (
@@ -281,7 +321,9 @@ type Cell struct {
 	ColumnIndex int `json:"column_index"`
 	// Raw is the cell's original text exactly as read from the source
 	// (post-decoding, pre-numeric-parsing), truncated to
-	// Limits.MaxCellTextLength if necessary.
+	// Limits.MaxCellTextLength if necessary. For PDF, this is the
+	// reconstructed word/cell text after row/column grouping (see
+	// ingestion/pdf), not the raw per-glyph extraction fragments.
 	Raw string `json:"raw"`
 	// Numeric is the parsed numeric value, when Raw was successfully
 	// interpreted as a monetary amount. Nil when the cell was blank, was
@@ -296,6 +338,31 @@ type Cell struct {
 	// Formula is the cell's formula text, XLSX only, when the cell
 	// contains a formula. Empty otherwise. See FORMULA_WITHOUT_CACHED_VALUE.
 	Formula string `json:"formula,omitempty"`
+	// Bounds is the cell's position on its source page, PDF only. Nil for
+	// CSV/XLSX (which have no coordinate concept) and nil for any PDF cell
+	// this package could not confidently attribute a single bounding box to
+	// (e.g. one reconstructed by merging fragments spanning a wide X
+	// range) — see ingestion/pdf's layout doc comment for when this is and
+	// isn't populated.
+	Bounds *CellBounds `json:"bounds,omitempty"`
+}
+
+// CellBounds is a cell's approximate bounding box on its source PDF page,
+// in PDF user-space points (1/72 inch), with Y increasing upward from the
+// page's bottom edge, matching the PDF coordinate convention ledongthuc/pdf
+// itself exposes (see ingestion/pdf's extraction code) — this package
+// performs no coordinate-system translation, so a consumer overlaying these
+// coordinates on a rendered page image must account for that convention
+// itself (most page-rendering libraries use top-down Y).
+type CellBounds struct {
+	// X0 is the left edge.
+	X0 float64 `json:"x0"`
+	// X1 is the right edge.
+	X1 float64 `json:"x1"`
+	// Y0 is the bottom edge.
+	Y0 float64 `json:"y0"`
+	// Y1 is the top edge.
+	Y1 float64 `json:"y1"`
 }
 
 // Row is one row of a tabular document as structurally interpreted by this
@@ -305,18 +372,29 @@ type Cell struct {
 type Row struct {
 	// ID is a deterministic identifier unique within a single Result:
 	// "sheet-<index>-row-<n>" (0-based sheet index, 0-based row index). See
-	// ToRawLineItem, which copies this into financial.RawLineItem.ID.
+	// ToRawLineItems, which copies this into financial.RawLineItem.ID.
 	ID string `json:"id"`
 	// SheetIndex is the 0-based index of the source worksheet/tab. Always 0
-	// for CSV.
+	// for CSV. For PDF, always 0 as well — a PDF has no worksheet concept;
+	// see PageIndex for PDF's analogous provenance unit.
 	SheetIndex int `json:"sheet_index"`
 	// SheetName is the source worksheet/tab name, when applicable. Empty
-	// for CSV.
+	// for CSV and PDF.
 	SheetName string `json:"sheet_name,omitempty"`
 	// RowIndex is the 0-based row index within the sheet as read from the
 	// source (not reindexed after skipping blank rows), so it always
-	// matches the original document for traceability.
+	// matches the original document for traceability. For PDF, this is the
+	// row's 0-based index within its detected statement section (which may
+	// span multiple pages — see PageIndex for the specific source page).
 	RowIndex int `json:"row_index"`
+	// PageIndex is the 0-based source page this row was extracted from.
+	// Populated only by ingestion/pdf; always 0 for CSV/XLSX (which have no
+	// page concept), so this field is harmless additive metadata for those
+	// formats — never omitted from JSON (unlike most PDF-only fields on
+	// this struct) specifically so a zero PageIndex is indistinguishable
+	// from "not a PDF row" only by context, matching SheetIndex's identical
+	// always-present convention.
+	PageIndex int `json:"page_index"`
 	// Label is the detected line-item label for this row (the text of the
 	// label column). Empty for a genuinely blank row.
 	Label string `json:"label"`
@@ -327,12 +405,15 @@ type Row struct {
 	Kind StructuralKind `json:"kind"`
 	// Status is the financial.RowStatus this row maps to for downstream
 	// normalization, derived deterministically from Kind (see
-	// ToRawLineItem). Blank/heading rows are dropped before reaching
-	// RawLineItem entirely — see Result.Rows vs ToRawLineItems.
+	// ToRawLineItems). Blank rows are dropped before reaching RawLineItem
+	// entirely; heading rows are NOT dropped (see Result.Rows vs
+	// ToRawLineItems, and financial.RowKind).
 	Status financial.RowStatus `json:"status"`
 	// IndentLevel is a best-effort structural indentation depth (0 = no
 	// indentation detected), used as one signal for Kind/ParentLabel
-	// detection. Not a guarantee of accounting hierarchy depth.
+	// detection. Not a guarantee of accounting hierarchy depth. For PDF,
+	// this is derived from X-offset rather than leading whitespace — see
+	// ingestion/pdf's layout doc comment.
 	IndentLevel int `json:"indent_level,omitempty"`
 	// Cells holds every cell in the row, including the label cell and any
 	// cell not recognized as a detected period column, in original column
@@ -360,6 +441,52 @@ const (
 	WarnCellTextTruncated                 WarningCode = "CELL_TEXT_TRUNCATED"
 	WarnAmbiguousLabelColumn              WarningCode = "AMBIGUOUS_LABEL_COLUMN"
 	WarnStructuralInterpretationUncertain WarningCode = "STRUCTURAL_INTERPRETATION_UNCERTAIN"
+
+	// WarnPDFTextLayerMissing means a PDF page (or the whole document) has
+	// little or no extractable embedded text, short of the
+	// ErrCodeOCRRequired threshold (see that error code's doc comment for
+	// the distinction) but still worth flagging — e.g. one image-heavy page
+	// among otherwise-normal text pages. PDF only.
+	WarnPDFTextLayerMissing WarningCode = "PDF_TEXT_LAYER_MISSING"
+	// WarnPDFLayoutAmbiguous means row/column reconstruction from
+	// positioned text could not confidently determine structure for part
+	// of a page (e.g. text fragments whose Y-coordinates cluster into no
+	// clean row grouping at the configured tolerance). PDF only.
+	WarnPDFLayoutAmbiguous WarningCode = "PDF_LAYOUT_AMBIGUOUS"
+	// WarnMultipleStatementsDetected means ingestion/pdf's boundary
+	// detection found more than one statement section in a single PDF
+	// document (see the ingestion/pdf package doc comment's Option A
+	// multi-statement behavior) — informational, not a problem: every
+	// detected statement is still returned, one Result per statement. PDF
+	// only.
+	WarnMultipleStatementsDetected WarningCode = "MULTIPLE_STATEMENTS_DETECTED"
+	// WarnStatementBoundaryAmbiguous means ingestion/pdf found conflicting
+	// or insufficient deterministic signals (page titles, statement-type
+	// keywords, large vertical gaps, header changes) to confidently place
+	// a statement section boundary, and declined to guess — see the
+	// ingestion/pdf package doc comment's boundary-detection section. PDF
+	// only.
+	WarnStatementBoundaryAmbiguous WarningCode = "STATEMENT_BOUNDARY_AMBIGUOUS"
+	// WarnColumnAlignmentAmbiguous means column reconstruction found more
+	// than one equally plausible way to group positioned text into
+	// columns for part of a page (e.g. no recurring numeric-column X
+	// position was confidently identifiable). PDF only.
+	WarnColumnAlignmentAmbiguous WarningCode = "COLUMN_ALIGNMENT_AMBIGUOUS"
+	// WarnRepeatedHeaderRemoved means ingestion/pdf identified and
+	// suppressed a repeated page header/column-heading row on a page after
+	// the first it appeared on (see the ingestion/pdf package doc
+	// comment's multi-page behavior), so it does not become a duplicate
+	// row. PDF only.
+	WarnRepeatedHeaderRemoved WarningCode = "REPEATED_HEADER_REMOVED"
+	// WarnUnparseablePDFValue mirrors WarnUnparseableNumericCell but is
+	// emitted specifically for a PDF-extraction-quirk value ingestion/pdf's
+	// numeric handling recognized as monetary-shaped but could not safely
+	// resolve deterministically (see the ingestion/pdf package doc
+	// comment's numeric-parsing section) — kept as its own code, rather
+	// than reusing WarnUnparseableNumericCell, so a caller can distinguish
+	// "malformed in the source" from "an extraction-layout ambiguity
+	// specific to PDF text reconstruction." PDF only.
+	WarnUnparseablePDFValue WarningCode = "UNPARSEABLE_PDF_VALUE"
 )
 
 // Warning is a non-fatal parsing issue: the parser produced a result, but
@@ -385,6 +512,9 @@ type Warning struct {
 	ColumnIndex int `json:"column_index,omitempty"`
 	// RowID identifies the affected Row.ID, when applicable.
 	RowID string `json:"row_id,omitempty"`
+	// PageIndex identifies the affected PDF page, when applicable. Always
+	// omitted (zero value) for CSV/XLSX warnings. PDF only.
+	PageIndex int `json:"page_index,omitempty"`
 }
 
 // ErrorCode is a stable identifier for a fatal parsing error. See the Err*
@@ -396,6 +526,34 @@ const (
 	ErrCodeNoTabularData     ErrorCode = "NO_TABULAR_DATA"
 	ErrCodeLimitExceeded     ErrorCode = "LIMIT_EXCEEDED"
 	ErrCodeUnsupportedFormat ErrorCode = "UNSUPPORTED_FORMAT"
+
+	// ErrCodeOCRRequired means a PDF was successfully opened as a valid PDF
+	// document, but contains little or no extractable embedded text (e.g.
+	// an image-only/scanned statement) — see ingestion/pdf's OCR-required
+	// detection for the exact trigger thresholds. This is deliberately a
+	// DIFFERENT code from ErrCodeNoTabularData: ErrCodeNoTabularData means
+	// "there is no usable data here at all" (e.g. an empty CSV), while
+	// ErrCodeOCRRequired means "there IS a real document, it simply has no
+	// text layer this deterministic, non-OCR package can read" — a caller
+	// needs to distinguish these to decide whether to offer an OCR
+	// workflow at all (this package never performs OCR itself — see the
+	// repository README's "what this project intentionally does not
+	// contain" section, which OCR remains permanently on regardless of
+	// this code's existence).
+	ErrCodeOCRRequired ErrorCode = "OCR_REQUIRED"
+	// ErrCodePDFPageLimitExceeded means a PDF document has more pages than
+	// Limits.MaxPages. A more specific ErrorCode than the generic
+	// ErrCodeLimitExceeded so a caller can special-case "this document is
+	// just too long" (e.g. offer to retry with a page range via
+	// pdf.Options.PageStart/PageEnd) without string-matching Error.Detail.
+	// PDF only.
+	ErrCodePDFPageLimitExceeded ErrorCode = "PDF_PAGE_LIMIT_EXCEEDED"
+	// ErrCodePDFTextLimitExceeded means a PDF document exceeded
+	// Limits.MaxTextFragments (across the whole document) or
+	// Limits.MaxTextLengthPerPage (on any single page) during extraction.
+	// A more specific ErrorCode than the generic ErrCodeLimitExceeded,
+	// analogous to ErrCodePDFPageLimitExceeded. PDF only.
+	ErrCodePDFTextLimitExceeded ErrorCode = "PDF_TEXT_LIMIT_EXCEEDED"
 )
 
 // Error is a fatal parsing error: no usable Result could be produced. It
@@ -492,23 +650,35 @@ type Result struct {
 	Warnings []Warning `json:"warnings,omitempty"`
 }
 
-// ToRawLineItems converts every non-structural Row in the result into a
+// ToRawLineItems converts every non-blank Row in the result into a
 // financial.RawLineItem, ready to pass to
-// financial/classification.ClassifyBatch. Heading and blank rows (Kind ==
-// StructuralHeading or StructuralBlank) are dropped: they carry no
-// classifiable label/values and financial.RawLineItem has no field to
-// represent "this row is a section heading". Subtotal/total rows ARE
-// included (with Status set to financial.RowStatusSubtotal/
-// RowStatusTotal), matching the way financial.RawLineItem carries
-// structural rows through to classification (see
-// financial/classification's structural detection, which this package's
-// own detection deliberately mirrors but does not replace — a caller may
-// still see classification independently reclassify a row's Status; this
-// package's Kind/Status are a best-effort hint, not a binding decision).
+// financial/classification.ClassifyBatch. Only genuinely blank rows (Kind
+// == StructuralBlank) are dropped — they never reach Result.Rows in the
+// first place (see the Result.Rows doc comment), so this is a no-op filter
+// in practice today, kept for defense in depth.
+//
+// Heading rows ARE included (as of the financial.RowKind field being
+// added to RawLineItem): each Row's Kind is translated to the
+// corresponding financial.RowKind via structuralKindToRowKind and carried
+// on RawLineItem.Kind, so a heading row survives all the way through
+// classification (which maps RowKindHeading to RowStatusIgnored — see
+// financial/classification.Classify) into financial.MappedLineItem,
+// letting a caller display section headings without separately keeping
+// Result.Rows around and re-correlating by RowID. Subtotal/total rows are
+// likewise included, with both Status (financial.RowStatusSubtotal/
+// RowStatusTotal, unchanged from before) and the new Kind populated.
+//
+// RawLineItem.Kind is this package's best-effort structural hint, not a
+// binding decision: financial/classification.Classify reads it before
+// falling back to its own label-based heuristic (see that package's
+// structural-detection stage), so the two packages' structural reads are
+// now unified rather than independently re-derived — closing the
+// known gap documented in the README's "Known deterministic ingestion
+// gaps" section prior to this field's introduction.
 func (r Result) ToRawLineItems() []financial.RawLineItem {
 	items := make([]financial.RawLineItem, 0, len(r.Rows))
 	for _, row := range r.Rows {
-		if row.Kind == StructuralHeading || row.Kind == StructuralBlank {
+		if row.Kind == StructuralBlank {
 			continue
 		}
 		values := make(map[financial.Period]float64, len(row.Values))
@@ -520,6 +690,7 @@ func (r Result) ToRawLineItems() []financial.RawLineItem {
 			StatementType: r.Metadata.StatementType,
 			Label:         row.Label,
 			ParentLabel:   row.ParentLabel,
+			Kind:          structuralKindToRowKind(row.Kind),
 			Values:        values,
 		})
 	}

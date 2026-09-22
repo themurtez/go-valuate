@@ -5,8 +5,14 @@ import "github.com/themurtez/go-valuate/financial"
 // Classify proposes a classification for a single raw line item, following a
 // deterministic precedence pipeline:
 //
-//  1. structural detection — is this row a subtotal/total rather than an
-//     ordinary account? If so, no code is proposed and Status reflects it.
+//  1. structural detection — is this row a heading/subtotal/total rather
+//     than an ordinary account? This stage checks raw.Kind first (an
+//     upstream adapter's own structural read, e.g. ingestion's
+//     label-shape-based ClassifyRowKind) before falling back to its own
+//     narrower label-token heuristic when raw.Kind is the zero value — see
+//     detectStructuralStatus. If the row is structural, no code is
+//     proposed and Status/Kind reflect it: RowStatusIgnored for a heading,
+//     RowStatusSubtotal/RowStatusTotal otherwise.
 //  2. explicit mapping — an exact financial.RawLineItem.ID match in
 //     cfg.Explicits.
 //  3. alias — an exact match of the row's normalized label against
@@ -29,15 +35,25 @@ func Classify(raw financial.RawLineItem, cfg Config) Result {
 	label := NormalizeLabel(raw.Label)
 	parent := NormalizeLabel(raw.ParentLabel)
 
-	if status, ok := detectStructuralStatus(label); ok {
+	if status, ok := detectStructuralStatus(label, raw.Kind); ok {
+		reason := "label matches a total/subtotal pattern"
+		matchedRule := "structural_detection"
+		if raw.Kind != financial.RowKindNormal {
+			reason = "upstream structural read: " + string(raw.Kind)
+			matchedRule = "structural_detection:kind"
+		}
+		if raw.Kind == financial.RowKindHeading {
+			reason = "row is a section heading, not a financial amount"
+		}
 		return Result{
 			RowID:          raw.ID,
 			Label:          raw.Label,
 			Status:         status,
+			Kind:           raw.Kind,
 			Confidence:     ConfidenceStructural,
 			Source:         SourceStructural,
-			Reason:         "label matches a total/subtotal pattern",
-			MatchedRule:    "structural_detection",
+			Reason:         reason,
+			MatchedRule:    matchedRule,
 			ReviewRequired: false,
 		}
 	}

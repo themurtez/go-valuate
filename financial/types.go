@@ -43,6 +43,52 @@ const (
 	RowStatusIgnored RowStatus = "ignored"
 )
 
+// RowKind classifies the structural role a source row plays in its
+// document, as read by the ingestion/extraction layer, independent of
+// RowStatus. Where RowStatus is the normalize-time directive ("should this
+// row's Values be aggregated?"), RowKind is the richer upstream structural
+// signal an adapter (ingestion/csv, ingestion/xlsx, ingestion/pdf, or any
+// other caller) can supply about what the row actually is in the source
+// document — including RowKindHeading, a concept RowStatus cannot express
+// on its own (RowStatusIgnored also covers blank separators and other
+// caller-excluded rows, not just headings).
+//
+// The zero value is RowKindNormal, so an existing caller that never sets
+// this field (including a bare RawLineItem{} built by hand, as many
+// existing tests do) gets exactly today's behavior: classification treats
+// the row as carrying no upstream structural hint and falls back to its own
+// label-based heuristic. This is what makes the field backward compatible.
+//
+// financial/classification.Classify reads RawLineItem.Kind before running
+// its own structural-detection heuristic: a non-zero Kind (HEADING,
+// SUBTOTAL, or TOTAL) short-circuits classification's narrower label-token
+// check, so an adapter that has already done a better structural read (e.g.
+// ingestion's ClassifyRowKind, which recognizes "Gross Profit" as a
+// subtotal from label shape alone) does not have its answer silently
+// overridden by a weaker one downstream. See financial/classification's
+// package doc comment for the full precedence pipeline.
+type RowKind string
+
+const (
+	// RowKindNormal is an ordinary line item, or "no upstream structural
+	// signal supplied" (the zero value — see the RowKind doc comment).
+	RowKindNormal RowKind = ""
+	// RowKindHeading is a section heading/title row: it introduces a group
+	// of following rows (e.g. "Operating Expenses") and carries no
+	// financial amount of its own. RowStatus has no equivalent concept;
+	// classification maps RowKindHeading to RowStatusIgnored, which
+	// financial.Normalize already excludes from aggregation.
+	RowKindHeading RowKind = "heading"
+	// RowKindSubtotal is a subtotal row (e.g. "Total Operating Expenses",
+	// "Gross Profit") that summarizes a group of preceding rows and must be
+	// excluded from aggregation to avoid double counting.
+	RowKindSubtotal RowKind = "subtotal"
+	// RowKindTotal is a grand-total row (e.g. "Net Income", "Total Assets")
+	// that summarizes the whole statement and must be excluded from
+	// aggregation to avoid double counting.
+	RowKindTotal RowKind = "total"
+)
+
 // SourceRef is a provenance reference back to a single source row. Normalized
 // financial values may carry zero or more of these so downstream consumers
 // can trace an aggregated figure back to the original data it was built
@@ -80,6 +126,13 @@ type RawLineItem struct {
 	// ParentLabel is the label of the enclosing group/section, if any
 	// (e.g. "Operating Expenses"). Optional.
 	ParentLabel string `json:"parent_label,omitempty"`
+	// Kind is the upstream structural read of this row (heading/subtotal/
+	// total), when the caller/adapter that produced this RawLineItem
+	// already determined one. Zero value (RowKindNormal) means no upstream
+	// signal was supplied, in which case financial/classification falls
+	// back to its own label-based structural heuristic exactly as it did
+	// before this field existed. See RowKind's doc comment.
+	Kind RowKind `json:"kind,omitempty"`
 	// Values maps period to the reported amount for that period.
 	Values map[Period]float64 `json:"values"`
 }
@@ -103,6 +156,14 @@ type MappedLineItem struct {
 	// Status indicates how this row should be treated during aggregation.
 	// The zero value is treated as RowStatusNormal.
 	Status RowStatus `json:"status,omitempty"`
+	// Kind carries forward the upstream structural read from the
+	// originating RawLineItem (see RawLineItem.Kind), preserved through
+	// classification so a downstream consumer (e.g. a future review UI)
+	// can distinguish a heading from an ordinary ignored row without
+	// re-deriving it. Classification does not use this field itself —
+	// Status is what drives normalization; Kind is carried for provenance/
+	// display only.
+	Kind RowKind `json:"kind,omitempty"`
 	// Values maps period to the reported amount for that period.
 	Values map[Period]float64 `json:"values"`
 }

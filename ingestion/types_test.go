@@ -55,6 +55,52 @@ func TestToRawLineItemsFieldMapping(t *testing.T) {
 	if item.Values[financial.Period("2023")] != 1000 {
 		t.Errorf("Values[2023] = %v, want 1000", item.Values[financial.Period("2023")])
 	}
+	if item.Kind != financial.RowKindNormal {
+		t.Errorf("Kind = %q, want %q (zero value) for an ordinary row", item.Kind, financial.RowKindNormal)
+	}
+}
+
+// TestToRawLineItemsKindMapping confirms every ingestion.StructuralKind
+// value a Row can carry (other than StructuralBlank, which never reaches
+// Result.Rows — see that field's doc comment) translates to the correct
+// financial.RowKind on the resulting RawLineItem, and that heading rows —
+// previously dropped by ToRawLineItems() entirely — now survive.
+func TestToRawLineItemsKindMapping(t *testing.T) {
+	input := "Account,2024\n" +
+		"Operating Expenses,\n" + // heading: label, no numeric value
+		"  Advertising,5000\n" + // normal
+		"Total Operating Expenses,5000\n" + // subtotal
+		"Net Income,5000\n" // total (bareStatementTotalPhrases)
+
+	res, err := icsv.Parse(strings.NewReader(input), ingestion.Options{})
+	if err != nil {
+		t.Fatalf("Parse: %+v", err)
+	}
+	items := res.ToRawLineItems()
+
+	want := map[string]financial.RowKind{
+		"Operating Expenses":       financial.RowKindHeading,
+		"Advertising":              financial.RowKindNormal,
+		"Total Operating Expenses": financial.RowKindSubtotal,
+		"Net Income":               financial.RowKindTotal,
+	}
+	got := make(map[string]financial.RowKind, len(items))
+	for _, item := range items {
+		got[item.Label] = item.Kind
+	}
+	for label, wantKind := range want {
+		gotKind, ok := got[label]
+		if !ok {
+			t.Errorf("row %q missing from ToRawLineItems() output", label)
+			continue
+		}
+		if gotKind != wantKind {
+			t.Errorf("row %q Kind = %q, want %q", label, gotKind, wantKind)
+		}
+	}
+	if len(got) != len(want) {
+		t.Errorf("got %d rows, want %d: %v", len(got), len(want), got)
+	}
 }
 
 func TestDefaultLimits(t *testing.T) {

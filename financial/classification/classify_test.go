@@ -352,6 +352,125 @@ func TestClassify_StructuralDetectionBeatsAliasesAndRules(t *testing.T) {
 	}
 }
 
+// --- RawLineItem.Kind precedence ---------------------------------------
+//
+// These tests exercise the fix for the documented "Gross Profit" gap (see
+// the README's former "Known deterministic ingestion gaps" entry): before
+// RawLineItem.Kind existed, Classify's own structuralTotalTokens check
+// (only "total"/"subtotal"/"net") did not recognize "Gross Profit" as
+// structural, so it fell through to ordinary classification. Now, when an
+// upstream adapter supplies Kind directly, that read wins outright.
+
+func TestClassify_KindSubtotalWinsEvenWhenLabelHeuristicWouldNotMatch(t *testing.T) {
+	// "Gross Profit" contains none of structuralTotalTokens
+	// ("total"/"subtotal"/"net"), so without Kind supplied, Classify's own
+	// label heuristic would NOT recognize it as structural (see the
+	// contrasting case in TestClassify_GrossProfitWithoutKindFallsThroughToOrdinaryClassification
+	// below) — proving raw.Kind, not the label, is what makes this pass.
+	row := rawRow("row-1", "Gross Profit", "")
+	row.Kind = financial.RowKindSubtotal
+
+	result := Classify(row, Config{Rules: DefaultRules()})
+
+	if result.Source != SourceStructural {
+		t.Errorf("Source = %v, want %v", result.Source, SourceStructural)
+	}
+	if result.Status != financial.RowStatusSubtotal {
+		t.Errorf("Status = %v, want %v", result.Status, financial.RowStatusSubtotal)
+	}
+	if result.Code != "" {
+		t.Errorf("Code = %v, want empty for a structural row", result.Code)
+	}
+	if result.Kind != financial.RowKindSubtotal {
+		t.Errorf("Kind = %v, want %v", result.Kind, financial.RowKindSubtotal)
+	}
+	if result.ReviewRequired {
+		t.Error("ReviewRequired = true, want false for a structural result")
+	}
+}
+
+func TestClassify_GrossProfitWithoutKindFallsThroughToOrdinaryClassification(t *testing.T) {
+	// Confirms the premise of the test above: with Kind left at its zero
+	// value (no upstream signal), "Gross Profit" is NOT recognized as
+	// structural by Classify's own label heuristic alone — it has no
+	// "total"/"subtotal"/"net" token. This is the exact historical bug:
+	// callers relying on ingestion's structural read (via Kind) now avoid
+	// it, but a bare hand-built RawLineItem with no Kind reproduces the old
+	// behavior unchanged, which is the documented backward-compatibility
+	// contract for the zero value.
+	row := rawRow("row-1", "Gross Profit", "")
+	result := Classify(row, Config{Rules: DefaultRules()})
+
+	if result.Source == SourceStructural {
+		t.Error("expected Gross Profit with no Kind supplied to NOT be classified as structural (label heuristic alone does not recognize it) — if this now passes, the label heuristic changed and this test's premise needs updating")
+	}
+}
+
+func TestClassify_KindTotalWinsOverLabelHeuristic(t *testing.T) {
+	// A label with no total/subtotal/net token, and no special-cased
+	// phrase, but an explicit upstream Kind of total.
+	row := rawRow("row-1", "Bottom Line Result", "")
+	row.Kind = financial.RowKindTotal
+
+	result := Classify(row, Config{Rules: DefaultRules()})
+
+	if result.Status != financial.RowStatusTotal {
+		t.Errorf("Status = %v, want %v", result.Status, financial.RowStatusTotal)
+	}
+	if result.Source != SourceStructural {
+		t.Errorf("Source = %v, want %v", result.Source, SourceStructural)
+	}
+}
+
+func TestClassify_KindHeadingProducesIgnoredStatusAndNoCode(t *testing.T) {
+	row := rawRow("row-1", "Operating Expenses", "")
+	row.Kind = financial.RowKindHeading
+	row.Values = map[financial.Period]float64{} // headings carry no amounts
+
+	result := Classify(row, Config{Rules: DefaultRules()})
+
+	if result.Status != financial.RowStatusIgnored {
+		t.Errorf("Status = %v, want %v", result.Status, financial.RowStatusIgnored)
+	}
+	if result.Source != SourceStructural {
+		t.Errorf("Source = %v, want %v", result.Source, SourceStructural)
+	}
+	if result.Code != "" {
+		t.Errorf("Code = %v, want empty for a heading row", result.Code)
+	}
+	if result.Kind != financial.RowKindHeading {
+		t.Errorf("Kind = %v, want %v", result.Kind, financial.RowKindHeading)
+	}
+	if result.Reason == "" {
+		t.Error("expected a non-empty Reason explaining the heading classification")
+	}
+	if financial.RowStatusIgnored != result.Status {
+		t.Fatalf("sanity: RowStatusIgnored constant mismatch")
+	}
+}
+
+func TestClassify_KindNormalDoesNotShortCircuitOrdinaryClassification(t *testing.T) {
+	// RowKindNormal is the zero value and means "no upstream signal" — an
+	// ordinary account row explicitly carrying it (as opposed to simply
+	// omitting Kind) must classify exactly as if Kind were never set.
+	cfg := Config{
+		AliasLayers: []AliasLayer{
+			{Name: "global", Aliases: []Alias{{Label: "Advertising & Promotion", Code: financial.CodeOpexMarketing}}},
+		},
+	}
+	row := rawRow("row-1", "Advertising & Promotion", "")
+	row.Kind = financial.RowKindNormal
+
+	result := Classify(row, cfg)
+
+	if result.Source != SourceAlias {
+		t.Errorf("Source = %v, want %v", result.Source, SourceAlias)
+	}
+	if result.Code != financial.CodeOpexMarketing {
+		t.Errorf("Code = %v, want %v", result.Code, financial.CodeOpexMarketing)
+	}
+}
+
 // --- Batch classification ---------------------------------------------
 
 func TestClassifyBatch_PreservesOrderAndCoversEveryRow(t *testing.T) {

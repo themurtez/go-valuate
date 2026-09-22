@@ -2,7 +2,10 @@ module github.com/themurtez/go-valuate
 
 go 1.27.1
 
-require github.com/xuri/excelize/v2 v2.11.0
+require (
+	github.com/ledongthuc/pdf v0.0.0-20260907135840-6c8c28e0e8a0
+	github.com/xuri/excelize/v2 v2.11.0
+)
 
 require (
 	github.com/richardlehane/mscfb v1.0.7 // indirect

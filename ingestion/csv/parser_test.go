@@ -322,20 +322,43 @@ func TestMaxCellTextLengthTruncatesWithWarning(t *testing.T) {
 	}
 }
 
-func TestToRawLineItemsExcludesHeadingsAndBlanks(t *testing.T) {
+// TestToRawLineItemsIncludesHeadingsExcludesBlanks confirms the
+// financial.RowKind contract: heading rows now survive ToRawLineItems()
+// (carrying Kind == financial.RowKindHeading, since RawLineItem gained a
+// field to represent "this is a section heading"), while blank separator
+// rows are still excluded entirely, matching the ingestion contract's
+// original "blank rows do not necessarily need to become RawLineItems"
+// guidance. Subtotal rows remain present, now carrying both Status and
+// Kind.
+func TestToRawLineItemsIncludesHeadingsExcludesBlanks(t *testing.T) {
 	input := "Account,2024\nOperating Expenses,\n  Advertising,5000\n,,\nTotal Operating Expenses,5000\n"
 	res := mustParse(t, input, ingestion.Options{})
 	items := res.ToRawLineItems()
+
+	foundHeading := false
 	for _, item := range items {
 		if item.Label == "Operating Expenses" {
-			t.Error("heading row should be excluded from RawLineItems")
+			foundHeading = true
+			if item.Kind != financial.RowKindHeading {
+				t.Errorf("heading row Kind = %q, want %q", item.Kind, financial.RowKindHeading)
+			}
+			if len(item.Values) != 0 {
+				t.Errorf("heading row Values = %v, want empty", item.Values)
+			}
 		}
 	}
-	// Subtotal row should still be present, with Status set.
+	if !foundHeading {
+		t.Error("heading row should be present in RawLineItems")
+	}
+
+	// Subtotal row should still be present, with Status and Kind set.
 	foundSubtotal := false
 	for _, item := range items {
 		if item.Label == "Total Operating Expenses" {
 			foundSubtotal = true
+			if item.Kind != financial.RowKindSubtotal {
+				t.Errorf("subtotal row Kind = %q, want %q", item.Kind, financial.RowKindSubtotal)
+			}
 		}
 	}
 	if !foundSubtotal {
