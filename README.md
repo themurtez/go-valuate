@@ -225,6 +225,7 @@ go-valuate/
   valuation/report/           presentation-neutral, JSON-serializable report model
   valuation/e2e/               end-to-end fixture tests exercising the full pipeline
   settings/                  generic hierarchical settings resolver
+  review/                    review Plan/Decisions/Apply/Readiness domain layer (see `review` below)
   fixtures/                  example JSON matching the Go types, used by tests
                              as living documentation
 ```
@@ -3149,6 +3150,7 @@ persist historical valuations").
 | Consensus formula | `consensus.FormulaVersion`, echoed on `consensus.Result.FormulaVersion` | The fixed statistics/dispersion formula set (`valuation/consensus`) |
 | Report schema | `report.SchemaVersion`, echoed on `report.Report.SchemaVersion` | This package's own `Report` shape — distinct from any upstream package's version, which is separately echoed inside each section |
 | Settings resolution schema | `settings.ResolutionSchemaVersion`, echoed on `settings.Resolution.SchemaVersion` | The `Values`/`Sources` shape `Resolve` produces |
+| Review schema | `review.SchemaVersion`, echoed on `review.Plan.Version` | `ReviewItem`/`Plan`/`Decision`/`ApplyResult` shapes and the deterministic ID/severity/readiness rules that produce them (`review`) |
 
 **The rule for bumping a version:** whenever a formula, an availability/
 validation rule, a default, a sign convention, or an output shape changes
@@ -3180,13 +3182,14 @@ unverified incidental property of the standard library).
 | `valuation/orchestrator.Run.Methods` | Same fixed method order |
 | `valuation/consensus.Result.Requested` / `Included` / `Conversions` | `Requested` preserves caller order exactly; `Included` and `Conversions` preserve that same order (with excluded entries removed from `Included` only) |
 | `valuation/report.Report.Methods` | Same fixed method order (`methodOrder`, mirroring the orchestrator's) |
+| `review.Plan.Items` | Primarily by `Severity` (`BLOCKING`, `ERROR`, `WARNING`, `INFO`), then by `Kind` (string order), then by `SourceRowID`, then by `ID` — a real `sort.SliceStable` over exactly these keys (`review`'s `sortItems`), never left to `Build`'s internal append order |
 
 ## Error taxonomy
 
 Most packages in this repository do not return a Go `error` at all —
 invalidity is communicated through `Result.Available` plus structured
 `Result.Errors`/`Result.Warnings` (see each package's own section above).
-Where a package does surface structured problems, it uses one of two
+Where a package does surface structured problems, it uses one of three
 established, stable-code systems rather than a caller having to parse
 message strings:
 
@@ -3207,6 +3210,20 @@ message strings:
   intentionally not merged into `valuation.Issue`: the two packages'
   problem domains don't overlap, and forcing one type to serve both would
   either leak valuation-specific codes into `financial` or vice versa.
+- **`review.Issue{ItemID, Code review.IssueCode, Severity, Message}`** —
+  `review`'s own separate, independently well-formed system
+  (`IssueUnknownItemID`, `IssueWrongPayloadKind`, `IssueInvalidAction`,
+  `IssueMissingPayload`, `IssueInvalidCode`, `IssueInvalidRowKind`,
+  `IssueNonFiniteAmount`, `IssueMalformedPeriod`, `IssueDuplicateItemID`,
+  `IssueConflictingDecision`, `IssueIncompatibleDecision`), a third system
+  rather than reusing either of the two above: `review`'s problem domain
+  (unknown review-item IDs, wrong decision-payload-for-item-kind,
+  conflicting duplicate decisions) doesn't overlap with `valuation`'s
+  (rate/weight/value-basis validity) or `adjustments`' (adjustment-set
+  internal consistency) domain, and forcing one of those types to also
+  serve `review` would either leak review-specific codes into
+  `financial`/`valuation` or vice versa — the same reasoning above applied
+  a third time.
 
 Two structured-but-not-error-severity vocabularies exist alongside these
 and are not folded in, since they already serve the "stable, matchable"
@@ -3501,18 +3518,276 @@ subsection, to keep PDF-only detail out of this CSV/XLSX-focused list.
 
 ## Recommended next phase
 
-With CSV, XLSX, text-based PDF, and now scanned/image-only PDF (via local
-Tesseract OCR — see [Scanned/image PDF support (OCR)](#scannedimage-pdf-support-ocr))
-all covered, deterministic ingestion of every realistic financial
--statement source format this repository targets is in place. The
-remaining gaps are the ones this repository has consistently scoped out at
-every phase (see
+With CSV, XLSX, text-based PDF, scanned/image-only PDF (via local
+Tesseract OCR — see [Scanned/image PDF support (OCR)](#scannedimage-pdf-support-ocr)),
+and now the deterministic `review` domain layer (see [`review`](#review)
+below) all in place, this repository's deterministic domain scope is now
+essentially complete: ingestion, classification, normalization,
+reconciliation, metrics, adjustments, maintainable earnings, the five
+valuation methods, applicability, orchestration, consensus, sensitivity,
+reporting, settings resolution, and — closing the loop between
+machine-proposed values and a human confirming them — a structured review/
+decision/readiness layer sitting immediately ahead of "proceed to
+valuation." The remaining gaps are the ones this repository has
+consistently scoped out at every phase (see
 [What this project intentionally does not contain](#what-this-project-intentionally-does-not-contain)):
-a persistence layer, HTTP/API handlers and auth, a review UI for
-low-confidence OCR rows/values (the domain metadata to support one —
-`OCRProvenance.ReviewRecommended`, per-cell confidence, original text — is
-already in place; only the UI itself is out of scope here), and AI/LLM
-assistance of any kind (document understanding, OCR correction,
-classification, or otherwise). Each remains a natural candidate for a
-future module built on top of the types and packages already defined here,
-but none should be started as part of this repository's own scope.
+a persistence layer, HTTP/API handlers and auth, an actual rendered review
+UI (the domain metadata AND now the full review-domain model needed to
+build one — `review.Plan`, `review.ReviewItem`, `review.Decision`,
+`review.ApplyResult`, `review.Readiness` — are already in place; only the
+UI itself, Vue or otherwise, is out of scope here), and AI/LLM assistance
+of any kind (document understanding, OCR correction, classification,
+automatic adjustment suggestions, or otherwise). Each remains a natural
+candidate for a future module or application layer built on top of the
+types and packages already defined here, but none should be started as
+part of this repository's own scope.
+
+## `review`
+
+The last major deterministic domain layer ahead of persistence/HTTP/UI/AI
+work: it sits immediately after ingestion/classification/reconciliation and
+immediately before a caller commits to running valuation, turning
+"something upstream could not resolve automatically" into a structured,
+stable, JSON-serializable model a future application can render, collect
+decisions against, and apply — rather than each caller inventing its own ad
+hoc review/confirmation flow on top of this repository's other packages.
+
+```
+Ingestion
+   ↓
+Classification
+   ↓
+Review Plan
+   ↓
+User Decisions   ← future UI/main app
+   ↓
+Apply Decisions
+   ↓
+Normalize / Reconcile
+   ↓
+Readiness Gate
+   ↓
+Valuation
+```
+
+**No UI, no persistence, no AI.** `review` contains the exact same
+exclusions the rest of this repository does (see
+[What this project intentionally does not contain](#what-this-project-intentionally-does-not-contain)):
+no Vue components, no forms, no HTTP endpoints, no database tables, no user
+identity, no audit database, no AI/LLM suggestions, no automatic add-back
+suggestions, no workflow queues, no notifications/email, no cloud OCR. It
+has no idea whether the "caller" resolving a `Decision` is a script, a
+future Vue app, or a human clicking a button in a browser — it only defines
+the domain shape a review workflow needs (`Build` → `Plan` → `Decisions` →
+`Apply` → corrected data) and applies it deterministically. **The future UI
+is expected to render this model, not duplicate its rules in Vue** — every
+threshold, every ID scheme, every severity/readiness rule lives here in Go,
+once, so a review screen is a rendering problem, not a second
+implementation of "when does this need review."
+
+Exported surface, by file:
+
+- **`types.go`** — `Kind` (the eight review kinds, below), `Severity`
+  (`INFO`/`WARNING`/`ERROR`/`BLOCKING`), `Status`
+  (`PENDING`/`RESOLVED`/`REJECTED`/`INVALID_DECISION`), `ReviewItem` (one
+  stable review unit, with one typed `*...Payload` field populated per
+  `Kind` — mirroring `orchestrator.MethodOutcome`'s five separate typed
+  pointers rather than a generic `any`/`map[string]any`), the eight
+  `*Payload` types, `Summary`, `Plan`, `SchemaVersion`.
+- **`errors.go`** — `IssueSeverity`, `IssueCode`, `Issue`, `HasErrors` — a
+  third stable-code system alongside `valuation.Issue` and
+  `adjustments.Issue` (see [Error taxonomy](#error-taxonomy) below for why).
+- **`decisions.go`** — `Action`
+  (`ACCEPT`/`OVERRIDE`/`IGNORE`/`REJECT`/`CONFIRM`), `Decision` (an
+  `ItemID` + `Action` + one typed `*...Decision` payload field per item
+  kind), and the six typed decision-payload structs.
+- **`build.go`** — `Policy`, `DefaultPolicy()`, `RowContext`, `BuildInput`,
+  `AssumptionSource`, `Build(BuildInput, Policy) Plan`, `IsMaterial`.
+- **`apply.go`** — `Source`, `AppliedDecision`, `InvalidDecision`,
+  `ApplyResult`, `Apply(Source, Plan, []Decision) ApplyResult`.
+- **`readiness.go`** — `ReadinessState`
+  (`READY`/`READY_WITH_WARNINGS`/`NOT_READY`), `ReasonCode`, `Reason`,
+  `Readiness`, `EvaluateReadiness([]ReviewItem) Readiness`.
+
+### Review kinds
+
+Eight kinds, each with its own typed payload (`ReviewItem.Classification`,
+`.OCRText`, `.OCRNumeric`, `.PeriodDetail`, `.Structure`,
+`.Reconciliation`, `.Adjustment`, `.Assumption` — exactly one populated per
+item, matching `Kind`):
+
+| Kind | Triggered by |
+|---|---|
+| `CLASSIFICATION` | `classification.Result.IsUnknown()`; `ReviewRequired == true`; confidence below `Policy.ClassificationConfidenceThreshold`; the strongest alternative candidate is within `Policy.AlternativeConfidenceGap` of the primary result ("materially close"); or `Policy.ReviewAllClassifications` requests review for every row. |
+| `OCR_TEXT` | A label cell (`ingestion.Cell.OCR != nil`, not a recognized value column) below `Policy.OCRConfidenceThreshold`, or `Policy.RequireReviewForAllOCR`. |
+| `OCR_NUMERIC` | A value-column cell with `Cell.OCR != nil` and either a parsed value below `Policy.NumericOCRConfidenceThreshold`, `OCRProvenance.NumericCorrected == true`, or the OCR-ambiguous case (`Cell.OCR != nil && !Cell.Parsed`, distinct from an ordinary non-OCR parse failure) — or `Policy.RequireReviewForAllOCR`. |
+| `PERIOD` | `ingestion.DetectedPeriod.PeriodType == PeriodTypeUnknown` (unparsed — always `BLOCKING`) or `Confidence < 1.0` (ambiguous). |
+| `STRUCTURE` | Any row carrying a non-zero upstream `financial.RowKind` (heading/subtotal/total) — always `INFO`, advisory confirmation only, never blocking. |
+| `RECONCILIATION` | A `reconciliation.Check` with `Status == StatusWarning` or `StatusFail`; a `FAIL` is `ERROR` by default, or `BLOCKING` when `Policy.ReconciliationFailureBlocks` is true. |
+| `ADJUSTMENT` | Every `adjustments.Adjustment` a caller supplies gets a confirmation item — `Build` never invents one, only confirms. |
+| `VALUATION_ASSUMPTION` | Every resolved key in a supplied `settings.Resolution`-shaped `AssumptionSource`, only when `Policy.EnableAssumptionReview` is true (opt-in). |
+
+### Severity semantics
+
+`INFO` (context only — e.g. a structural row confirmation), `WARNING`
+(review recommended, does not block), `ERROR` (suspicious/invalid input
+that should normally be corrected, still does not block by itself), and
+`BLOCKING` (valuation must not proceed until resolved). Severity is
+assigned entirely at `Build` time from structured `Policy` thresholds and
+upstream enum/boolean fields — **never** by parsing a `Reason`/`Title`
+string; [Readiness](#readiness) below is a pure function of `Severity` +
+`Status` for exactly this reason.
+
+### Deterministic IDs
+
+Every `ReviewItem.ID` follows a fixed, colon-delimited, kind-specific
+format, documented on each ID-building function in `build.go`:
+
+| Kind | ID format | What legitimately changes the ID |
+|---|---|---|
+| `CLASSIFICATION` | `classification:<row-id>` | Only the row ID. A re-run with the same row but a different proposed code/confidence keeps the SAME ID. |
+| `OCR_TEXT` | `ocr-text:<row-id>:<column-index>` | Row ID or column index. |
+| `OCR_NUMERIC` | `ocr-numeric:<row-id>:<period>` (falls back to `ocr-numeric:<row-id>:col<n>` when no period is known for that column) | Row ID, period, or column (when period is unknown). Not the parsed amount/confidence. |
+| `PERIOD` | `period:header:<column-index>` | Only the column index. |
+| `STRUCTURE` | `structure:<row-id>` | Only the row ID. |
+| `RECONCILIATION` | `reconciliation:<check-code>:<period>` (`dataset` in place of period for dataset-wide checks) | Check code or period. Not Status/Expected/Actual. |
+| `ADJUSTMENT` | `adjustment:<adjustment-id>` | Only the caller-supplied adjustment ID. |
+| `VALUATION_ASSUMPTION` | `assumption:<setting-key>` | Only the setting key. |
+
+No random UUIDs anywhere — every ID is built from slice iteration or a
+fixed string template, never from Go map iteration order (`Build`'s
+internal sorts, e.g. over `AssumptionSource.AssumptionValues()`'s keys, are
+always `sort.Strings`/`sort.SliceStable` before an ID is assigned). This
+package needed **zero new `go.mod` entries** to achieve this.
+
+### Decision model
+
+`Decision{ItemID, Action, <one typed payload>}` mirrors `ReviewItem`'s own
+typed-payload design rather than a generic value bag. `Action` is one of
+`ACCEPT`, `OVERRIDE`, `IGNORE`, `REJECT`, `CONFIRM`; which actions a given
+`Kind` accepts, and which payload `OVERRIDE` requires, is a fixed table in
+`apply.go`'s `actionAllowedForKind`:
+
+| Kind | Allowed actions | `OVERRIDE` payload |
+|---|---|---|
+| `CLASSIFICATION` | accept, override, ignore | `ClassificationDecision{Code}` — validated via `financial.IsValidCode` |
+| `OCR_TEXT` | accept, override, reject | *(text override carried as a display value only — no domain structure to correct beyond the label)* |
+| `OCR_NUMERIC` | accept, override, reject | `OCRNumericDecision{Amount}` — must be finite |
+| `PERIOD` | accept, override | `PeriodDecision{Period}` — must be non-empty |
+| `STRUCTURE` | accept, override | `StructureDecision{RowKind}` — must be one of the four known `financial.RowKind` values |
+| `RECONCILIATION` | accept, confirm, ignore | *(acknowledgment only)* |
+| `ADJUSTMENT` | accept, override, ignore | `AdjustmentDecision{Included, Amount, NewAmount, Reason}` |
+| `VALUATION_ASSUMPTION` | accept, override, confirm | `AssumptionDecision{Value}` — must be a `float64` (finite) or `bool` |
+
+`Apply` validates every decision (unknown item ID; wrong action for the
+item's kind; missing payload; invalid code/RowKind; non-finite amount;
+empty period; conflicting or merely-repeated duplicate decisions for the
+same `ItemID`) and reports every rejection as a `review.Issue` in
+`ApplyResult.Invalid` — never a bare Go `error`. Two byte-identical
+repeated decisions for the same item are a harmless warning (only the
+first is applied); two *different* decisions for the same item in one call
+are `CONFLICTING_DECISION` errors and neither is applied.
+
+### Apply semantics
+
+`Apply(source Source, plan Plan, decisions []Decision) ApplyResult` never
+mutates `source`, `plan`, or `decisions` (proven directly in
+`apply_immutability_test.go` via before/after JSON-snapshot comparison, not
+merely asserted in a comment) and never returns a Go `error` — an empty
+`decisions` slice is a valid, empty case (nothing applied, every item stays
+unresolved), and every structural problem is a decision-level `Issue`
+instead. "Corrected domain structures" come back as: `MappedLineItems`
+(`[]financial.MappedLineItem`, with classification `Code`/`Status` and
+structure `Kind`/`Status` corrected — an overridden `RowKind` is translated
+to the matching `financial.RowStatus` exactly as
+`classification.Classify` already does, so headings/totals are never
+accidentally normalized after a review override); `Adjustments`
+(`[]adjustments.Adjustment`, with `Included`/`Amount`/`Reason` corrected);
+`CorrectedNumerics map[string]float64` (keyed by `ReviewItem.ID`, a
+rejected numeric item is simply absent — treated exactly like a cell that
+never parsed); and `CorrectedPeriods map[string]financial.Period`. Every
+returned collection is a fresh copy — mutating `ApplyResult`'s returned
+slices/maps never leaks back into the caller's original `Source`.
+
+### Readiness
+
+`EvaluateReadiness([]ReviewItem) Readiness` is a **pure function of
+`Severity` + `Status`**, never of any free-text field: `NOT_READY` if and
+only if at least one unresolved (`Status.IsUnresolved()`) item has
+`Severity == BLOCKING`; `READY_WITH_WARNINGS` if no such item exists but at
+least one unresolved `WARNING`/`ERROR` item does; `READY` otherwise. An
+unresolved `WARNING`/`ERROR` item — no matter how many — can never by
+itself force `NOT_READY`; only `Policy`-driven `BLOCKING` severity gates
+readiness (e.g. a reconciliation failure only blocks when
+`Policy.ReconciliationFailureBlocks` is set). `Readiness.Reasons` carries a
+stable `ReasonCode` + message + `ItemID`/`Kind` per contributing item,
+never a bare string.
+
+### Materiality policy
+
+`Policy` (constructed via `DefaultPolicy()`, matching `ingestion.DefaultLimits`'
+pattern):
+
+| Field | Default | Effect |
+|---|---|---|
+| `ClassificationConfidenceThreshold` | `classification.DefaultReviewThreshold` (0.90) | Below this, a classification gets a review item. |
+| `OCRConfidenceThreshold` | `70.0` | **Tesseract's native 0–100 scale**, NOT `classification.Confidence`'s `[0, 1]` scale — see the scale-mismatch warning below. |
+| `NumericOCRConfidenceThreshold` | `70.0` | Same 0–100 scale, for numeric OCR cells. |
+| `RequireReviewForAllOCR` | `false` | "Strict mode" — review every OCR-derived cell regardless of confidence. |
+| `ReconciliationFailureBlocks` | `false` | Conservative opt-in: a reconciliation `FAIL` is `ERROR`, not `BLOCKING`, unless set. |
+| `MaterialAmountThreshold` | `0` | `0` means "not applied" — materiality gating is **off** by default (everything material), never "nothing is material." |
+| `MaterialPercentOfRevenue` | `0` | Same "0 = not applied" convention, as a fraction of revenue (e.g. `0.01` = 1%). |
+| `ReviewAllClassifications` | `false` | Caller-opt-in: review every classification, not just low-confidence/UNKNOWN ones. |
+| `EnableAssumptionReview` | `false` | Caller-opt-in: expose `VALUATION_ASSUMPTION` items at all. |
+| `AlternativeConfidenceGap` | `0.05` | How close an alternative's confidence must be to count as "materially close." |
+
+**Scale-mismatch footgun, called out prominently because it is a real
+one:** `OCRConfidenceThreshold`/`NumericOCRConfidenceThreshold` are on
+Tesseract's native 0–100 scale (`ingestion.OCRProvenance.Confidence`,
+matching `lowConfidenceThreshold` in `ingestion/pdf/ocr_provenance.go`) —
+**not** the `[0, 1]` scale `classification.Confidence` uses. Setting
+`OCRConfidenceThreshold: 0.9` (a natural-looking number if you're used to
+classification's scale) would flag virtually every OCR cell as
+low-confidence, since Tesseract routinely reports well above `0.9` on its
+own 0–100 scale.
+
+`IsMaterial(amount float64, revenue *float64, policy Policy) bool`
+(`build.go`) is `review`'s one small materiality helper per the task
+brief's explicit "not its own subsystem" scope: material if
+`abs(amount) >= MaterialAmountThreshold` OR (`revenue` known,
+`MaterialPercentOfRevenue > 0`, and `abs(amount) >=
+MaterialPercentOfRevenue * revenue`) — with both thresholds at their `0`
+default, every amount is material.
+
+### Audit/explainability
+
+Every `AppliedDecision` (part of `ApplyResult.Applied`) carries exactly:
+`ItemID`, `Kind`, `Action`, `OriginalProposal` (what `Build` originally
+proposed), `FinalValue` (what was ultimately used), and `Reason` (the
+structured reason the item needed review in the first place) — enough to
+answer "what did the system propose, what did the user change, why was
+review requested, and what value was ultimately used" without a database.
+**No user ID or timestamp** — a deliberate scope decision for this
+standalone library, not an oversight; a consuming application layer owns
+identity/time.
+
+### Integration with a future Vue/main app
+
+A future UI's job is to **render** `Plan`/`ReviewItem`/`Decision`/
+`ApplyResult`/`Readiness` — every field needed to build a review screen
+(title, reason, severity, current/proposed value, alternatives, provenance,
+bounding boxes for an OCR overlay) is already here — and to collect
+`Decision` values back from a human, never to re-derive severity
+thresholds, ID schemes, or readiness rules in TypeScript/Vue. Those rules
+living in exactly one place (this package) is the entire point of building
+`review` as a deterministic domain layer instead of embedding review logic
+in a frontend.
+
+See [`review/e2e_test.go`](review/e2e_test.go) for a complete worked
+example: raw financial rows → classification → `review.Build` → an
+attempted `review.Apply` while a `BLOCKING` classification item is still
+unresolved (asserted `NOT_READY`) → decisions resolve it → `review.Apply`
+again → `financial.Normalize` → `financial/metrics.Calculate` →
+`financial/adjustments.Apply` → `financial/earnings.Calculate` →
+`valuation/sde.Calculate`, producing a real priced equity value only once
+every blocking review item is resolved.
