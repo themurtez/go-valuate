@@ -30,6 +30,7 @@ func main() {
 	must(writeAmbiguousWorkbook(filepath.Join(dir, "ambiguous_workbook.xlsx")))
 	must(writeTotalsSubtotalsWorkbook(filepath.Join(dir, "totals_subtotals.xlsx")))
 	must(generatePDFFixtures(dir))
+	must(generateOCRPDFFixtures(dir))
 
 	fmt.Println("fixtures generated")
 }

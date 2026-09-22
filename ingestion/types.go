@@ -131,6 +131,54 @@ type Limits struct {
 	// than any real financial statement page plausibly has is instead
 	// treated as a resource-exhaustion signal worth refusing outright).
 	MaxTextLengthPerPage int
+
+	// MaxOCRPages caps the number of pages ingestion/pdf will send to OCR
+	// across a single document (OCRAuto/OCRForce modes only — see
+	// pdf.Options.OCR). Distinct from MaxPages (which bounds the whole
+	// document's page count regardless of OCR): a caller may want a much
+	// lower OCR-specific ceiling, since OCR is far more expensive per page
+	// than embedded-text extraction. 0 means DefaultLimits.MaxOCRPages.
+	// Exceeding this is a fatal ErrCodeOCRPageLimitExceeded. PDF only.
+	MaxOCRPages int
+	// MaxImagePixels caps a single scanned page's dominant image's total
+	// pixel count (width * height) before OCR is attempted on it — a
+	// defensive bound against a decompression-bomb-style oversized raster
+	// embedded in an untrusted PDF. 0 means DefaultLimits.MaxImagePixels.
+	// Exceeding this is a fatal ErrCodeOCRImageLimitExceeded. PDF only.
+	MaxImagePixels int64
+	// MaxImageDimension caps a single scanned page's dominant image's
+	// width or height individually (in pixels), independent of
+	// MaxImagePixels (which bounds total area — a pathologically
+	// wide-and-thin image could pass a pixel-count check while still being
+	// unreasonable to process). 0 means DefaultLimits.MaxImageDimension.
+	// Exceeding this is a fatal ErrCodeOCRImageLimitExceeded. PDF only.
+	MaxImageDimension int
+	// MaxOCRWords caps the number of OCR-recognized words ingestion/pdf
+	// will retain across a single document before giving up, bounding
+	// downstream row/column reconstruction work against a pathological
+	// recognition result. 0 means DefaultLimits.MaxOCRWords. Exceeding
+	// this is a fatal ErrCodeLimitExceeded. PDF only.
+	MaxOCRWords int
+	// MaxOCRTextBytes caps the total number of bytes of OCR-recognized
+	// text ingestion/pdf will retain across a single document. 0 means
+	// DefaultLimits.MaxOCRTextBytes. Exceeding this is a fatal
+	// ErrCodeLimitExceeded. PDF only.
+	MaxOCRTextBytes int
+	// OCRPageTimeoutSeconds bounds how long OCR recognition may run for a
+	// SINGLE page, in whole seconds. 0 means
+	// DefaultLimits.OCRPageTimeoutSeconds. Exceeding this is a fatal
+	// ErrCodeOCRTimeout for that page (which fails the whole parse in
+	// OCRForce mode, or is recorded as a page-level failure in OCRAuto
+	// mode for that page only — see the ingestion/pdf package doc
+	// comment's OCR modes section). PDF only.
+	OCRPageTimeoutSeconds int
+	// OCRTotalTimeoutSeconds bounds how long OCR recognition may run
+	// ACROSS THE WHOLE DOCUMENT (all pages combined), in whole seconds. 0
+	// means DefaultLimits.OCRTotalTimeoutSeconds (no additional
+	// whole-document bound beyond the sum of per-page timeouts — still
+	// subject to any deadline already present on the caller's own
+	// context.Context). PDF only.
+	OCRTotalTimeoutSeconds int
 }
 
 // DefaultLimits returns the conservative default Limits applied whenever a
@@ -145,6 +193,14 @@ func DefaultLimits() Limits {
 		MaxPages:             500,
 		MaxTextFragments:     2_000_000,
 		MaxTextLengthPerPage: 200_000,
+
+		MaxOCRPages:            50,
+		MaxImagePixels:         50_000_000, // e.g. ~7071x7071px; well above any realistic single-page scan
+		MaxImageDimension:      10_000,
+		MaxOCRWords:            200_000,
+		MaxOCRTextBytes:        10 * 1024 * 1024, // 10 MiB
+		OCRPageTimeoutSeconds:  60,
+		OCRTotalTimeoutSeconds: 600,
 	}
 }
 
@@ -175,6 +231,27 @@ func (l Limits) withDefaults() Limits {
 	}
 	if l.MaxTextLengthPerPage <= 0 {
 		l.MaxTextLengthPerPage = d.MaxTextLengthPerPage
+	}
+	if l.MaxOCRPages <= 0 {
+		l.MaxOCRPages = d.MaxOCRPages
+	}
+	if l.MaxImagePixels <= 0 {
+		l.MaxImagePixels = d.MaxImagePixels
+	}
+	if l.MaxImageDimension <= 0 {
+		l.MaxImageDimension = d.MaxImageDimension
+	}
+	if l.MaxOCRWords <= 0 {
+		l.MaxOCRWords = d.MaxOCRWords
+	}
+	if l.MaxOCRTextBytes <= 0 {
+		l.MaxOCRTextBytes = d.MaxOCRTextBytes
+	}
+	if l.OCRPageTimeoutSeconds <= 0 {
+		l.OCRPageTimeoutSeconds = d.OCRPageTimeoutSeconds
+	}
+	if l.OCRTotalTimeoutSeconds <= 0 {
+		l.OCRTotalTimeoutSeconds = d.OCRTotalTimeoutSeconds
 	}
 	return l
 }
@@ -345,6 +422,60 @@ type Cell struct {
 	// range) — see ingestion/pdf's layout doc comment for when this is and
 	// isn't populated.
 	Bounds *CellBounds `json:"bounds,omitempty"`
+	// OCR carries OCR-specific provenance/confidence for this cell, when
+	// it was reconstructed from OCR-recognized words rather than an
+	// embedded PDF text layer. Nil for CSV/XLSX and for any PDF cell read
+	// via the embedded-text path (OCRDisabled, or a page that had a usable
+	// text layer under OCRAuto). See OCRProvenance.
+	OCR *OCRProvenance `json:"ocr,omitempty"`
+}
+
+// OCRProvenance traces one cell's value back to the OCR recognition that
+// produced it, so a future review UI can show a user exactly what the OCR
+// engine reported (Cell.Raw already carries the FINAL text used for
+// parsing, which may differ from OriginalText — see OCRNumericCorrected)
+// without needing database IDs or anything beyond what this package
+// already computes in-memory.
+type OCRProvenance struct {
+	// OriginalText is the OCR engine's own recognized text for this cell,
+	// EXACTLY as reported, before any numeric-safety normalization (see
+	// ingestion/pdf's ocr_numeric.go) — always preserved even when
+	// Cell.Raw ends up different (OCRNumericCorrected) or the cell could
+	// not be parsed at all (OCRNumericAmbiguous).
+	OriginalText string `json:"original_text"`
+	// Confidence is the engine-reported confidence for this cell's
+	// dominant/lowest-confidence constituent word, on whatever scale the
+	// engine uses (see ingestion/ocr's package doc comment: this is NEVER
+	// a calibrated probability). -1 means the engine did not report a
+	// confidence.
+	Confidence float64 `json:"confidence"`
+	// NumericCorrected is true when this cell's numeric value required a
+	// deterministic heuristic correction before it would parse (see
+	// WarnOCRNumericCorrected) — a signal the future review UI can use to
+	// flag this specific value for a closer look, distinct from a
+	// low-confidence value that parsed cleanly on the first attempt.
+	NumericCorrected bool `json:"numeric_corrected,omitempty"`
+	// ReviewRecommended is true when this cell's OCR provenance meets one
+	// or more of this package's own review-worthiness signals (low
+	// confidence, a numeric correction was applied, or the value could
+	// not be parsed at all) — a single boolean summary so a consuming
+	// application does not need to reimplement this package's own
+	// confidence-threshold logic just to decide whether to highlight a
+	// row for human review.
+	ReviewRecommended bool `json:"review_recommended,omitempty"`
+	// PixelBounds is the cell's approximate bounding box on the SOURCE
+	// SCANNED IMAGE (not the PDF page — see CellBounds for the
+	// PDF-points equivalent, which is still populated alongside this for
+	// an OCR cell), in source-image pixels, top-left origin. Nil if not
+	// available.
+	PixelBounds *PixelBounds `json:"pixel_bounds,omitempty"`
+}
+
+// PixelBounds is a bounding box in source-image pixel coordinates
+// (top-left origin, Y increasing downward — the raster-image convention,
+// distinct from CellBounds's PDF bottom-up points convention).
+type PixelBounds struct {
+	X, Y, Width, Height int
 }
 
 // CellBounds is a cell's approximate bounding box on its source PDF page,
@@ -487,6 +618,74 @@ const (
 	// "malformed in the source" from "an extraction-layout ambiguity
 	// specific to PDF text reconstruction." PDF only.
 	WarnUnparseablePDFValue WarningCode = "UNPARSEABLE_PDF_VALUE"
+
+	// WarnOCRUsed means at least one page of this result was read via OCR
+	// rather than an embedded text layer (see ingestion/pdf's OCR_AUTO/
+	// OCR_FORCE modes). Purely informational — every OCR-derived row is
+	// still returned normally; this is the signal a caller uses to decide
+	// whether extra review is warranted for this document. PDF only.
+	WarnOCRUsed WarningCode = "OCR_USED"
+	// WarnLowOCRResolution means a scanned page's estimated effective
+	// resolution (derived from its dominant image's pixel dimensions
+	// against the PDF page's own known point size) is below the minimum
+	// this package considers reliable for OCR (see ingestion/pdf's
+	// minPlausibleDPI) — OCR is still attempted and its output still
+	// returned, but with lower expected accuracy. PDF only.
+	WarnLowOCRResolution WarningCode = "LOW_OCR_RESOLUTION"
+	// WarnLowConfidenceLabel means a row's label text was reconstructed
+	// substantially or entirely from OCR words below a confidence
+	// threshold this package considers reliable (see ingestion/pdf's
+	// numeric/label-confidence handling) — the label is still used
+	// as-is (never silently dropped), but a caller should treat it as a
+	// candidate for human review rather than fully trusted text. PDF
+	// only.
+	WarnLowConfidenceLabel WarningCode = "LOW_CONFIDENCE_LABEL"
+	// WarnLowConfidenceNumericValue means a cell's numeric value was
+	// parsed from OCR text below the confidence threshold — the value is
+	// still parsed and returned when it matches a defensible numeric
+	// pattern (see WarnOCRNumericAmbiguous for when it does NOT), but
+	// should be treated as a review candidate. PDF only.
+	WarnLowConfidenceNumericValue WarningCode = "LOW_CONFIDENCE_NUMERIC_VALUE"
+	// WarnOCRNumericCorrected means a numeric cell's OCR text was
+	// rewritten by a narrow, deterministic, context-sensitive correction
+	// (e.g. a digit-shaped confusion within an otherwise unambiguous
+	// numeric run — see ingestion/pdf's ocr_numeric.go) before parsing.
+	// The ORIGINAL OCR text is always preserved in Cell.Raw/
+	// OCRProvenance.OriginalText regardless of this warning, so a review
+	// UI can always show what the engine actually reported. PDF only.
+	WarnOCRNumericCorrected WarningCode = "OCR_NUMERIC_CORRECTED"
+	// WarnOCRNumericAmbiguous means a numeric cell's OCR text contained a
+	// pattern this package considers too ambiguous to safely parse or
+	// correct (e.g. a mix of digits and letters with no single
+	// defensible reading) — the cell is left unparsed (Cell.Parsed ==
+	// false, Cell.Numeric == nil) rather than guessing, exactly like
+	// WarnUnparseableNumericCell, but flagged with this more specific
+	// code so a caller can distinguish "OCR read something numeric-
+	// shaped but ambiguous" from an ordinary malformed value. PDF only.
+	WarnOCRNumericAmbiguous WarningCode = "OCR_NUMERIC_AMBIGUOUS"
+	// WarnMultiplePageImages means a scanned page contained two or more
+	// embedded raster images that each independently looked page-shaped
+	// (see ingestion/pdf/pdfimage's dominant-image selection) — this
+	// package declined to guess which one is the real page scan; the
+	// page could not be OCR'd. PDF only.
+	WarnMultiplePageImages WarningCode = "MULTIPLE_PAGE_IMAGES"
+	// WarnNoDominantPageImage means a scanned page had no embedded raster
+	// image that plausibly represented the full page (e.g. only a small
+	// logo/icon was found, or no image at all) — the page could not be
+	// OCR'd. PDF only.
+	WarnNoDominantPageImage WarningCode = "NO_DOMINANT_PAGE_IMAGE"
+	// WarnMixedTextAndOCRPages means a single PDF document contained both
+	// pages with a usable embedded text layer and pages requiring OCR
+	// (OCR_AUTO mode) — informational: both kinds of pages were
+	// successfully combined into one result via the same layout/
+	// statement-interpretation pipeline. PDF only.
+	WarnMixedTextAndOCRPages WarningCode = "MIXED_TEXT_AND_OCR_PAGES"
+	// WarnUnsupportedEmbeddedImage means one or more embedded images on a
+	// page used an encoding this package's PDF image-extraction adapter
+	// could not decode (e.g. JBIG2/JPEG2000 — see
+	// ingestion/pdf/pdfimage's doc comment) and were skipped; OCR
+	// proceeded using whatever other image(s) remained. PDF only.
+	WarnUnsupportedEmbeddedImage WarningCode = "UNSUPPORTED_EMBEDDED_IMAGE"
 )
 
 // Warning is a non-fatal parsing issue: the parser produced a result, but
@@ -534,12 +733,13 @@ const (
 	// DIFFERENT code from ErrCodeNoTabularData: ErrCodeNoTabularData means
 	// "there is no usable data here at all" (e.g. an empty CSV), while
 	// ErrCodeOCRRequired means "there IS a real document, it simply has no
-	// text layer this deterministic, non-OCR package can read" — a caller
-	// needs to distinguish these to decide whether to offer an OCR
-	// workflow at all (this package never performs OCR itself — see the
-	// repository README's "what this project intentionally does not
-	// contain" section, which OCR remains permanently on regardless of
-	// this code's existence).
+	// text layer the DEFAULT, non-OCR parse path can read." With
+	// pdf.Options.OCR left at its default (OCRDisabled), this is still the
+	// terminal outcome for such a document, exactly as before. A caller
+	// that supplies pdf.Options.OCR = OCRAuto or OCRForce (along with an
+	// ingestion/ocr.Engine) instead triggers OCR fallback for exactly the
+	// pages that would otherwise produce this error — see the
+	// ingestion/pdf package doc comment's OCR modes section.
 	ErrCodeOCRRequired ErrorCode = "OCR_REQUIRED"
 	// ErrCodePDFPageLimitExceeded means a PDF document has more pages than
 	// Limits.MaxPages. A more specific ErrorCode than the generic
@@ -554,6 +754,46 @@ const (
 	// A more specific ErrorCode than the generic ErrCodeLimitExceeded,
 	// analogous to ErrCodePDFPageLimitExceeded. PDF only.
 	ErrCodePDFTextLimitExceeded ErrorCode = "PDF_TEXT_LIMIT_EXCEEDED"
+
+	// ErrCodeOCREngineUnavailable means OCR was requested (OCRAuto or
+	// OCRForce) but the supplied ingestion/ocr.Engine could not run (e.g.
+	// ingestion/ocr/tesseract's configured executable is not installed) —
+	// propagated from the engine's own ocr.ErrCodeEngineUnavailable. PDF
+	// only.
+	ErrCodeOCREngineUnavailable ErrorCode = "OCR_ENGINE_UNAVAILABLE"
+	// ErrCodeOCREngineFailed means the OCR engine ran but reported a
+	// failure recognizing a page (a non-zero exit code, malformed output,
+	// etc.) — propagated from ocr.ErrCodeEngineFailed, or raised directly
+	// by this package for an OCR-pipeline failure with no more specific
+	// code (e.g. a decode failure of the engine's own preprocessed input
+	// image). PDF only.
+	ErrCodeOCREngineFailed ErrorCode = "OCR_ENGINE_FAILED"
+	// ErrCodeOCRTimeout means OCR recognition did not complete within the
+	// configured per-page or total OCR timeout (see Limits.OCRPageTimeout/
+	// Limits.OCRTotalTimeout). PDF only.
+	ErrCodeOCRTimeout ErrorCode = "OCR_TIMEOUT"
+	// ErrCodeOCRPageLimitExceeded means a document requires OCR on more
+	// pages than Limits.MaxOCRPages allows. PDF only.
+	ErrCodeOCRPageLimitExceeded ErrorCode = "OCR_PAGE_LIMIT_EXCEEDED"
+	// ErrCodeOCRImageLimitExceeded means a scanned page's dominant image
+	// exceeds Limits.MaxImagePixels (or Limits.MaxImageDimension), a
+	// defensive bound against a decompression-bomb-style oversized raster
+	// embedded in an untrusted PDF. PDF only.
+	ErrCodeOCRImageLimitExceeded ErrorCode = "OCR_IMAGE_LIMIT_EXCEEDED"
+	// ErrCodeScannedPageImageUnavailable means a page requiring OCR has no
+	// single extractable raster image this package can act on — either no
+	// embedded image at all, or two or more images that each
+	// independently looked page-shaped (see
+	// ingestion/pdf/pdfimage.SelectDominantImage's ambiguity handling; the
+	// specific reason is in Error.Detail). PDF only.
+	ErrCodeScannedPageImageUnavailable ErrorCode = "SCANNED_PAGE_IMAGE_UNAVAILABLE"
+	// ErrCodePDFPageRenderRequired means a scanned page's real content is
+	// not representable as a single extractable embedded raster image at
+	// all (e.g. genuine vector-drawn page content) — true PDF page
+	// rendering, which this package does not implement (see the
+	// ingestion/pdf/pdfimage package doc comment's scope note), would be
+	// required to read this page. PDF only.
+	ErrCodePDFPageRenderRequired ErrorCode = "PDF_PAGE_RENDER_REQUIRED"
 )
 
 // Error is a fatal parsing error: no usable Result could be produced. It
@@ -629,6 +869,52 @@ type Metadata struct {
 	// See the ingestion/xlsx package doc comment and the repository
 	// README.
 	Dependency string `json:"dependency,omitempty"`
+	// OCR carries OCR-usage summary metadata for this result, when OCR was
+	// requested (pdf.Options.OCR != OCRDisabled) and at least one page was
+	// evaluated for OCR. Nil when OCR was never requested/used. PDF only.
+	// See OCRMetadata.
+	OCR *OCRMetadata `json:"ocr,omitempty"`
+}
+
+// OCRMetadata summarizes OCR usage across a single parsed statement
+// section, for caller-side reporting/review-UI decisions — never used as a
+// guarantee of accounting correctness (see AverageConfidence's doc
+// comment).
+type OCRMetadata struct {
+	// Used is true if any row in this result came from an OCR-read page.
+	Used bool `json:"used"`
+	// Pages lists the 0-based page indices that were read via OCR.
+	Pages []int `json:"pages,omitempty"`
+	// EmbeddedTextPages lists the 0-based page indices that were read via
+	// the existing embedded-text-layer path (populated only when this
+	// result mixes both — see WarnMixedTextAndOCRPages).
+	EmbeddedTextPages []int `json:"embedded_text_pages,omitempty"`
+	// EngineName identifies the OCR engine used (e.g. "tesseract"), copied
+	// from ocr.Result.EngineName.
+	EngineName string `json:"engine_name,omitempty"`
+	// EngineVersion is the engine's own reported version string, when
+	// obtainable.
+	EngineVersion string `json:"engine_version,omitempty"`
+	// AverageConfidence is the mean engine-reported confidence across
+	// every OCR word contributing to this result, on whatever scale the
+	// engine uses. INFORMATIONAL ONLY — never a guarantee of accounting
+	// correctness or a calibrated probability (see the ingestion/ocr
+	// package doc comment); a high average can still coexist with one
+	// badly misread critical number, which is exactly why per-cell
+	// OCRProvenance and the LowConfidence*/OCRNumericAmbiguous warnings
+	// exist rather than relying on this single aggregate figure. -1 means
+	// no confidence data was available.
+	AverageConfidence float64 `json:"average_confidence"`
+	// LowConfidenceNumericCount is the number of numeric cells in this
+	// result whose OCRProvenance.ReviewRecommended is true due to low
+	// confidence or a numeric correction.
+	LowConfidenceNumericCount int `json:"low_confidence_numeric_count,omitempty"`
+	// UnsupportedScanPageCount is the number of pages in the source
+	// document that required OCR but could not be processed (ambiguous or
+	// missing dominant page image, unsupported layout) — these pages
+	// contributed no rows to this result. See ingestion/pdf's per-page
+	// error handling in OCRAuto mode.
+	UnsupportedScanPageCount int `json:"unsupported_scan_page_count,omitempty"`
 }
 
 // Result is the complete output of parsing a single tabular financial

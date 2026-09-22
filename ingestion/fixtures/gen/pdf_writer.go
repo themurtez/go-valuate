@@ -71,11 +71,26 @@ type pdfTextRun struct {
 	text string
 }
 
-// pdfPage is one page's content: its text runs and (for the image-only
-// fixture) any drawn rectangles with no text at all.
+// pdfPage is one page's content: its text runs, any drawn rectangles (for
+// the text-free image-only fixture), and any embedded raster images (for
+// the scanned/OCR fixtures — see writeScannedImagePDF).
 type pdfPage struct {
-	runs  []pdfTextRun
-	rects [][4]float64 // x, y, w, h
+	runs   []pdfTextRun
+	rects  [][4]float64 // x, y, w, h
+	images []pdfPageImage
+}
+
+// pdfPageImage is one embedded JPEG XObject placed on a page at a given
+// position/size (in PDF points), used by the scanned-PDF OCR fixtures
+// (see writeScannedImagePDF) to embed a synthetic "scanned page" raster —
+// DCTDecode/JPEG is the simplest filter for a hand-rolled writer to emit
+// (the JPEG bytes themselves are written as-is into the stream, no PDF-side
+// re-encoding needed) and is one of the two encodings ingestion/pdf/pdfimage
+// fully decodes (see that package's extract.go doc comment).
+type pdfPageImage struct {
+	jpegData                []byte
+	pixelWidth, pixelHeight int
+	x, y, w, h              float64 // placement rect, in PDF points
 }
 
 // pdfDoc accumulates pages for writePDF.
@@ -122,18 +137,35 @@ func writePDF(doc *pdfDoc) []byte {
 		doc.pages = []pdfPage{{}}
 	}
 
-	// Object numbering: 1=Catalog, 2=Pages, 3=Font, then 2 objects per
-	// page (Page dict, Content stream), in page order.
+	// Object numbering: 1=Catalog, 2=Pages, 3=Font, then for each page (in
+	// order) one Page-dict object, one Content-stream object, and one
+	// Image-XObject object per embedded image on that page — a variable
+	// per-page object count, unlike the original fixed "2 objects per
+	// page" layout, since image XObjects are optional and page-specific.
+	// obj() must still be called in strictly increasing object-number
+	// order (it appends to buf sequentially and offsets are recorded by
+	// append position), so object numbers are precomputed below in the
+	// exact order they will be written: catalog, pages, font, then per
+	// page (page dict, content stream, image XObjects...).
 	const catalogObj = 1
 	const pagesObj = 2
 	const fontObj = 3
-	firstPageObj := fontObj + 1
 
 	pageObjNums := make([]int, numPages)
 	contentObjNums := make([]int, numPages)
-	for i := 0; i < numPages; i++ {
-		pageObjNums[i] = firstPageObj + i*2
-		contentObjNums[i] = pageObjNums[i] + 1
+	imageObjNums := make([][]int, numPages)
+
+	next := fontObj + 1
+	for i, page := range doc.pages {
+		pageObjNums[i] = next
+		next++
+		contentObjNums[i] = next
+		next++
+		imageObjNums[i] = make([]int, len(page.images))
+		for j := range page.images {
+			imageObjNums[i][j] = next
+			next++
+		}
 	}
 
 	kids := make([]string, numPages)
@@ -150,11 +182,6 @@ func writePDF(doc *pdfDoc) []byte {
 		widthsBuf = append(widthsBuf, fmt.Sprintf("%d", w))
 	}
 
-	// obj() must be called in strictly increasing object-number order
-	// since it appends to buf sequentially and offsets are recorded by
-	// append position — enforced here by construction (catalog, pages,
-	// font, then each page's dict+stream in order), not by a general
-	// out-of-order writer.
 	pendingCatalog := fmt.Sprintf("<< /Type /Catalog /Pages %d 0 R >>", pagesObj)
 	pendingPages := fmt.Sprintf("<< /Type /Pages /Kids [%s] /Count %d >>", strings.Join(kids, " "), numPages)
 	pendingFont := fmt.Sprintf("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /FirstChar 32 /LastChar 126 /Widths [%s] >>", strings.Join(widthsBuf, " "))
@@ -165,12 +192,31 @@ func writePDF(doc *pdfDoc) []byte {
 
 	for i, page := range doc.pages {
 		content := renderPageContent(page)
+
+		xObjEntries := make([]string, len(page.images))
+		for j, objNr := range imageObjNums[i] {
+			xObjEntries[j] = fmt.Sprintf("/Im%d %d 0 R", j, objNr)
+		}
+		resources := fmt.Sprintf("<< /Font << /F1 %d 0 R >>", fontObj)
+		if len(xObjEntries) > 0 {
+			resources += fmt.Sprintf(" /XObject << %s >>", strings.Join(xObjEntries, " "))
+		}
+		resources += " >>"
+
 		pageDict := fmt.Sprintf(
-			"<< /Type /Page /Parent %d 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 %d 0 R >> >> /Contents %d 0 R >>",
-			pagesObj, fontObj, contentObjNums[i],
+			"<< /Type /Page /Parent %d 0 R /MediaBox [0 0 612 792] /Resources %s /Contents %d 0 R >>",
+			pagesObj, resources, contentObjNums[i],
 		)
 		obj(pageObjNums[i], pageDict)
 		obj(contentObjNums[i], fmt.Sprintf("<< /Length %d >>\nstream\n%sendstream", len(content), content))
+
+		for j, img := range page.images {
+			imgDict := fmt.Sprintf(
+				"<< /Type /XObject /Subtype /Image /Width %d /Height %d /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length %d >>\nstream\n%s\nendstream",
+				img.pixelWidth, img.pixelHeight, len(img.jpegData), string(img.jpegData),
+			)
+			obj(imageObjNums[i][j], imgDict)
+		}
 	}
 
 	xrefStart := buf.Len()
@@ -191,6 +237,15 @@ func renderPageContent(page pdfPage) string {
 	}
 	for _, r := range page.rects {
 		fmt.Fprintf(&b, "%g %g %g %g re f\n", r[0], r[1], r[2], r[3])
+	}
+	for j, img := range page.images {
+		// The content-matrix form "w 0 0 h x y cm /ImN Do" places a unit
+		// square image XObject at (x,y) scaled to (w,h) points — the
+		// standard PDF idiom for positioning an image (PDF spec section
+		// 8.10). "/ImN" is a page-local Resources name (see writePDF's
+		// xObjEntries), not an indirect object reference, so the content
+		// stream itself never needs to know the image's object number.
+		fmt.Fprintf(&b, "q %g 0 0 %g %g %g cm /Im%d Do Q\n", img.w, img.h, img.x, img.y, j)
 	}
 	return b.String()
 }

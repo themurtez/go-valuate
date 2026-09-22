@@ -11,15 +11,24 @@
 //	        -> financial.Normalize
 //	        -> financial.FinancialDataset
 //
-// This is NOT OCR. A PDF with no usable embedded text layer (an
+// Parse itself is NOT OCR. A PDF with no usable embedded text layer (an
 // image-only/scanned statement) returns an explicit ErrCodeOCRRequired
 // error rather than silently producing an empty or fabricated result —
 // see hasUsableTextLayer in detect.go for the exact trigger thresholds.
-// This package never attempts OCR, never shells out to an external
-// command-line utility, and never executes anything embedded in the PDF
-// (JavaScript, launch actions, embedded files, forms) — see the Dependency
-// constant in extract.go and the repository README's PDF section for what
+// Parse never attempts OCR, never shells out to an external command-line
+// utility, and never executes anything embedded in the PDF (JavaScript,
+// launch actions, embedded files, forms) — see the Dependency constant in
+// extract.go and the repository README's PDF section for what
 // github.com/ledongthuc/pdf does and does not implement.
+//
+// A separate, entirely opt-in entry point, ParseWithOCR (see
+// ocr_parse.go), extends this same pipeline with optional OCR fallback
+// for scanned pages, via a caller-supplied ingestion/ocr.Engine (e.g.
+// ingestion/ocr/tesseract, a local Tesseract adapter). Parse's own
+// behavior — including ErrCodeOCRRequired — is completely unchanged by
+// this: ParseWithOCR called with its default Options.OCR (OCRDisabled)
+// is defined to behave identically to Parse. See the repository README's
+// "Scanned/image PDF support (OCR)" section for the full design.
 //
 // # Multiple statements per PDF
 //
@@ -91,6 +100,21 @@ type Options struct {
 	// unusually loose baseline alignment; decrease it if two genuinely
 	// distinct tightly-leaded rows are incorrectly merging.
 	RowYTolerance float64
+
+	// OCR selects OCR fallback behavior for a scanned/image-only PDF or
+	// individual scanned pages within an otherwise text-based PDF. The
+	// zero value (OCRDisabled) means no OCR is ever attempted — IDENTICAL
+	// behavior to before this field existed: Parse never reads this
+	// field at all (it always behaves as OCRDisabled); only
+	// ParseWithOCR (ocr_parse.go) honors OCRAuto/OCRForce, and only when
+	// called with a non-nil ingestion/ocr.Engine. See OCRMode and the
+	// package doc comment's OCR modes section.
+	OCR OCRMode
+	// Preprocess controls deterministic image preprocessing applied to a
+	// scanned page's image before OCR (see preprocess.go). Ignored when
+	// OCR is OCRDisabled. Zero value means no preprocessing (OCR runs
+	// against the extracted page image unmodified).
+	Preprocess PreprocessOptions
 }
 
 // resolveRowYTolerance returns o.RowYTolerance, or defaultRowYTolerance if

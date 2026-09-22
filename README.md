@@ -73,9 +73,13 @@ CSV / XLSX / Text PDF
      Normalize
 ```
 
-**Image/scanned PDFs are not parsed yet. They return `OCR_REQUIRED`.** See
-[`ingestion/pdf`](#ingestionpdf) below for the exact detection thresholds
-and why this package will never attempt OCR itself.
+**Image/scanned PDFs return `OCR_REQUIRED` by default.** `pdf.Parse`
+never attempts OCR — see [`ingestion/pdf`](#ingestionpdf) below for the
+exact detection thresholds. A caller that explicitly opts in
+(`pdf.ParseWithOCR` with `Options.OCR` set to `OCRAuto`/`OCRForce` and a
+supplied `ingestion/ocr.Engine`) can OCR a scanned PDF via a local
+Tesseract installation — see
+[Scanned/image PDF support (OCR)](#scannedimage-pdf-support-ocr) below.
 
 A separate, cross-cutting `settings` package supplies the hierarchical
 system/account/client/valuation rate/multiple/method-enable resolution
@@ -86,17 +90,19 @@ and handed into a run rather than looked up mid-calculation (see
 [Settings snapshot contract](#settings-snapshot-contract)).
 
 **What is deliberately absent from every stage above, and from this
-repository entirely:** no database, no HTTP/API layer, no AI/LLM, no OCR.
-Deterministic tabular ingestion (`ingestion`, `ingestion/csv`,
-`ingestion/xlsx`, and — as of text-based PDF support —
-[`ingestion/pdf`](#ingestionpdf)) is the one exception to the
-"no document parsing" rule established in earlier revisions of this
-README — see [`ingestion`](#ingestion) below for why a purely
-structural, non-AI, non-database reader fits this repository's
-constraints. This still does NOT include OCR or image/scanned PDFs:
-`ingestion/pdf` reads only a PDF's own embedded text layer
-deterministically and returns an explicit `OCR_REQUIRED` condition,
-never fabricated content, when no usable text layer exists — see
+repository entirely:** no database, no HTTP/API layer, no AI/LLM. Deterministic
+tabular ingestion (`ingestion`, `ingestion/csv`, `ingestion/xlsx`, text-based
+PDF support in [`ingestion/pdf`](#ingestionpdf), and opt-in local-Tesseract
+OCR for scanned PDFs — see
+[Scanned/image PDF support (OCR)](#scannedimage-pdf-support-ocr)) is the
+one exception to the "no document parsing" rule established in earlier
+revisions of this README — see [`ingestion`](#ingestion) below for why a
+purely structural, non-AI, non-database reader (plus a narrowly-scoped,
+provenance-tracked, local-only OCR step) fits this repository's
+constraints. `ingestion/pdf`'s default (`pdf.Parse`) still reads only a
+PDF's own embedded text layer deterministically and returns an explicit
+`OCR_REQUIRED` condition, never fabricated content, when no usable text
+layer exists and OCR was not explicitly requested — see
 [What this project intentionally does not contain](#what-this-project-intentionally-does-not-contain)
 below for the full list and the reasoning behind it. Every stage's output
 is plain, JSON-serializable Go structs; see
@@ -116,8 +122,7 @@ contains **no**:
 - users, organizations, or tenants
 - Stripe, subscriptions, or billing
 - Vue or any frontend code
-- AI/LLM integrations
-- OCR, image preprocessing, or scanned-document parsing
+- AI/LLM integrations, embeddings, or AI-based document understanding
 - cloud/storage integrations
 - QuickBooks/Xero or other accounting-software API integrations
 - external valuation data sources
@@ -125,19 +130,30 @@ contains **no**:
 Deterministic tabular ingestion (`ingestion` and its `csv`/`xlsx`/`pdf`
 subpackages — see [`ingestion`](#ingestion) below) is a narrow, deliberate
 exception: it is pure structural interpretation of data that is either
-already tabular (CSV/XLSX: rows, columns, headers) or has a deterministic
+already tabular (CSV/XLSX: rows, columns, headers), has a deterministic
 embedded text layer a born-digital PDF's own producer wrote (text-based
-PDF — see [`ingestion/pdf`](#ingestionpdf)). It performs no AI/ML/OCR,
-touches no database or network, and hands off to
-`financial/classification` — which this repository already contains —
-rather than duplicating it. OCR and image/scanned-document parsing remain
-fully excluded, including for PDF: `ingestion/pdf` reads only a PDF's own
-embedded text layer, and a PDF with no usable text layer (an image-only or
-scanned statement) returns an explicit `OCR_REQUIRED` result rather than
-attempting any image-understanding step — turning a raster image into
-text is exactly the document-understanding/OCR problem this repository's
-constraint rules out; ingestion only begins once content is either already
-tabular or already text.
+PDF — see [`ingestion/pdf`](#ingestionpdf)), or — as of the OCR support
+described in [`ingestion/ocr`](#ingestionocr) — a scanned/image-only PDF
+page whose raster content has been converted to positioned text via a
+local OCR engine. It performs no AI/ML document-understanding, touches no
+database or network, and hands off to `financial/classification` — which
+this repository already contains — rather than duplicating it. OCR is
+narrowly scoped and clearly separated from the rest of this repository's
+deterministic guarantees: it is the one genuinely non-deterministic
+component in the ingestion layer (see `ingestion/ocr`'s package doc
+comment), is entirely opt-in (`ingestion/pdf`'s default behavior is
+unchanged — a PDF with no usable embedded text layer still returns
+`OCR_REQUIRED` unless a caller explicitly requests OCR and supplies an
+engine), runs only via a local executable (Tesseract, invoked as an
+external process — never a cloud API, never bundled/linked into this
+module), and every OCR-derived value carries confidence/provenance data
+rather than being presented with the same "deterministic and explainable"
+guarantee the rest of `ingestion` offers. This remains categorically
+distinct from AI/LLM document understanding: OCR here does character
+recognition only, with zero interpretation, correction, or classification
+delegated to any model — see `ingestion/ocr`'s and `ingestion/pdf`'s
+numeric-safety sections for exactly how narrow the one permitted
+correction step is.
 
 The design rule is:
 
@@ -150,13 +166,16 @@ Go structs / JSON-compatible data in
 No global state. No infrastructure dependencies. No side effects. Every
 exported function in this repository is a pure function of its inputs.
 
-Deterministic tabular/text-PDF ingestion (structural interpretation of a
-tabular financial statement export, or a text-based PDF's positioned text,
-into `financial.RawLineItem` values, with no classification of its own) is
+Deterministic tabular/text-PDF/scanned-PDF ingestion (structural
+interpretation of a tabular financial statement export, a text-based
+PDF's positioned text, or a scanned PDF's OCR-recognized text, into
+`financial.RawLineItem` values, with no classification of its own) is
 implemented in `ingestion` and its `ingestion/csv`/`ingestion/xlsx`/
-`ingestion/pdf` subpackages; deterministic, rule/alias-based classification
-(deciding *which* canonical code a raw row maps to) is implemented in
-`financial/classification`;
+`ingestion/pdf` subpackages, with the OCR engine abstraction and local
+Tesseract adapter in `ingestion/ocr`/`ingestion/ocr/tesseract` and PDF
+page-image extraction in `ingestion/pdf/pdfimage`; deterministic,
+rule/alias-based classification (deciding *which* canonical code a raw row
+maps to) is implemented in `financial/classification`;
 dataset-internal-consistency checking is implemented in
 `financial/reconciliation`; derived financial metrics (EBITDA, SDE, working
 capital, growth/volatility, etc.) are implemented in `financial/metrics`;
@@ -168,10 +187,11 @@ themselves (SDE multiple, EBITDA multiple, capitalization of earnings, DCF,
 adjusted net asset value) are implemented in `valuation` and its
 per-method subpackages — see below for all six. Method applicability
 rules, a multi-method consensus/weighting engine, sensitivity analysis,
-reporting/UI, AI/LLM assistance, a database, OCR, and image/scanned-document
-parsing are all still explicitly **out of scope for this repository** at
-this stage. They are expected to be built as later modules, or in the
-consuming application, on top of the types and packages defined here — see
+reporting/UI, AI/LLM assistance, a database, and QuickBooks/Xero-style
+accounting-software integrations are all still explicitly **out of scope
+for this repository** at this stage. They are expected to be built as
+later modules, or in the consuming application, on top of the types and
+packages defined here — see
 [Recommended next module](#recommended-next-module).
 
 ## Package boundaries
@@ -767,6 +787,387 @@ below:
   (`LocaleEnUS`)** — a European-formatted PDF (`.` thousands, `,`
   decimal) is out of scope for the same reason it already is for
   CSV/XLSX (see Known deterministic ingestion gaps below).
+
+## Scanned/image PDF support (OCR)
+
+With `ingestion/pdf` covering born-digital text PDFs, the remaining gap —
+a **scanned or image-only PDF**, with no embedded text layer at all — is
+closed by three additional packages: `ingestion/ocr` (an engine-agnostic
+OCR abstraction), `ingestion/ocr/tesseract` (a local Tesseract adapter),
+and `ingestion/pdf/pdfimage` (PDF page-image extraction), plus OCR
+integration inside `ingestion/pdf` itself (`ocr_*.go`). OCR is entirely
+**opt-in**: every existing `pdf.Parse` caller sees no behavior change
+whatsoever — a scanned PDF still returns `OCR_REQUIRED` unless a caller
+explicitly calls `pdf.ParseWithOCR` with `Options.OCR` set to `OCRAuto` or
+`OCRForce` and supplies an `ingestion/ocr.Engine`.
+
+```
+                       ┌─ embedded text ─────────┐
+PDF ─→ page inspection                           ├→ positioned layout
+                       └─ scanned image → OCR ──┘
+                                                     ↓
+                                            statement parser
+                                                     ↓
+                                                RawLineItem
+                                                     ↓
+                                             classification
+                                                     ↓
+                                               normalization
+```
+
+**No second interpretation pipeline.** This is the load-bearing design
+constraint of the entire OCR addition: OCR-recognized words are converted
+(`ocr_layout.go`) into the *exact same* `word`/`line` types
+`ingestion/pdf`'s embedded-text extraction already produces (`layout.go`),
+then flow through the *identical, unmodified* row/column reconstruction
+(`groupRows`, `detectColumnBoundaries`/`buildSectionGrid` —
+`columns.go`/`build.go`), statement-boundary detection (`splitSections` —
+`detect.go`), and `ingestion.BuildResult` entry point every other format
+(CSV, XLSX, text PDF) already drives. There is exactly one
+statement-interpretation pipeline in this repository; OCR only supplies a
+second SOURCE of positioned text into it, never a competing interpreter.
+
+### `ingestion/ocr`
+
+Defines `Engine`, the one interface every OCR backend implements:
+
+```go
+type Engine interface {
+    Recognize(ctx context.Context, image ImageInput, opts Options) (Result, error)
+}
+```
+
+`ImageInput` wraps a standard `image.Image` (aliased as `DecodedImage`)
+plus a page index and optional DPI hint. `Result` carries `[]Word` —
+positioned recognition output with `Text`, `Confidence`, `X`/`Y`/`Width`/
+`Height` (source-image pixel coordinates), `PageIndex`, and the engine's
+own block/paragraph/line grouping IDs when available — plus `EngineName`/
+`EngineVersion`. **Confidence is never treated as a probability** (see the
+package doc comment): it is carried through unmodified from whatever scale
+the underlying engine reports (Tesseract: 0–100, a heuristic score with no
+statistical grounding), useful only as a relative, engine-internal signal.
+
+A `FakeEngine` (not test-file-gated, so `ingestion/pdf`'s own tests can
+import it directly) provides a fully deterministic, in-memory `Engine`
+implementation for testing every layer downstream of OCR recognition
+(positioned-word handling, confidence propagation, numeric ambiguity,
+fallback mode selection, mixed text/OCR pages, timeout/error propagation)
+without requiring Tesseract — or any real OCR engine — installed
+anywhere. Every OCR test in this repository except the explicitly-gated
+`Tesseract*Integration*` tests uses `FakeEngine`.
+
+Errors are a small stable `ErrorCode` set (`OCR_ENGINE_UNAVAILABLE`,
+`OCR_ENGINE_FAILED`, `OCR_TIMEOUT`) wrapped in `*ocr.Error`, mirroring
+`ingestion.Error`'s Code/Message/Detail shape.
+
+### `ingestion/ocr/tesseract`
+
+A local-Tesseract `Engine` implementation, invoking a locally installed
+`tesseract` executable via `os/exec` — never CGO, never a native link
+dependency, **never through a shell** (every argument is a separate
+`exec.CommandContext` argument; no string-built command line, no `sh -c`).
+
+**Runtime dependency, not a build dependency.** This is the load-bearing
+requirement: the entire `go-valuate` module, including this package,
+compiles with `go build ./...` on a machine with **no Tesseract
+installed at all** — confirmed directly in this repository's own CI-style
+verification, which never has Tesseract present. Tesseract availability is
+discovered only when `Engine.Recognize` (or `Engine.Available()`) is
+actually called: a missing/unresolvable executable produces a structured
+`*ocr.Error{Code: OCR_ENGINE_UNAVAILABLE}`, never a build failure, never a
+panic. `Engine.ExecutablePath` is configurable (default: bare `"tesseract"`,
+resolved via `PATH`).
+
+**Dependency/license/version, verified rather than assumed:**
+
+| | |
+|---|---|
+| Tesseract OCR | External executable, **Apache License 2.0**. Never vendored, compiled, or linked into this Go module or its binary in any form — a caller who never calls `Engine.Recognize` never touches Tesseract at all. |
+| Minimum version | 4.0+ (LSTM engine, stable `tsv` output format). Not tested against the legacy Tesseract 3.x engine. |
+| Language packs | English only (`eng`) for this repository's MVP scope — the caller's system must have `tesseract-ocr-eng` (or the distribution equivalent) installed alongside the executable; this package does not download, bundle, or manage language data. |
+
+**Output format.** Tesseract is invoked as `tesseract <in> <out> -l eng
+tsv`, producing Tesseract's own TSV format (`level page_num block_num
+par_num line_num word_num left top width height conf text`) — the one
+Tesseract output format that supplies text, confidence, bounding boxes,
+and line/block grouping all in one deterministic, line-oriented file
+(`tsv.go`'s `parseTSV`). Only level-5 (word) rows are kept; the
+line/paragraph/block aggregate rows Tesseract also emits are discarded,
+since this repository re-derives row/line grouping itself from word
+positions (see "no second interpretation pipeline" above) rather than
+trusting any engine's own grouping as authoritative.
+
+**Temporary files.** Tesseract's CLI is file-based (no reliable
+positioned-output stdin/stdout mode across versions), so one temporary
+input PNG and one temporary TSV output are created per `Recognize` call,
+via `os.CreateTemp` (OS temp dir by default, `Engine.TempDir` overridable;
+unpredictable names; `0600` permissions where the platform supports it)
+and unconditionally removed via `defer`-guarded cleanup regardless of
+success/failure — no name reuse between calls, no persisted upload data.
+No global mutable state anywhere in this package: an `Engine` value holds
+only its own configuration and is safe for concurrent use.
+
+**Stdout/stderr** are captured into bounded in-memory buffers (a
+`boundedWriter` caps stderr at 64 KiB) — never connected to the parent
+process's own streams, never unbounded.
+
+### `ingestion/pdf/pdfimage`
+
+Extracts a scanned PDF page's dominant embedded raster image, isolating
+`github.com/pdfcpu/pdfcpu` behind this package's own types — no `pdfcpu`
+type appears in its exported API (`extract.go` is the only file that
+imports it directly).
+
+**Dependency, verified rather than assumed:** `github.com/pdfcpu/pdfcpu`
+(pinned in `go.mod`/`go.sum`), **Apache-2.0**. Confirmed directly (not
+assumed from documentation) before adoption: actively maintained (roughly
+monthly releases), a dependency tree free of GPL/AGPL (every transitive
+dependency — `hhrutter/tiff`, `mattn/go-runewidth`, `clipperhouse/uax29/v2`,
+`go.yaml.in/yaml/v3`, the `golang.org/x/*` packages — is MIT, BSD-3, or
+Apache/MIT dual-licensed), and its `pkg/api` image-extraction functions
+(`ExtractImagesRaw`, `PageDims`, `PageCount`) operate on `io.ReadSeeker`,
+never requiring a filesystem-only API. Pure Go: no CGO, no native link
+dependency, so it adds no build requirement beyond what `go build` already
+needs. **Known gap:** JBIG2-encoded monochrome scans come back from
+`pdfcpu` as a raw undecoded stream (no built-in JBIG2 decoder) — this
+package does not attempt to decode that raw stream (silently
+misinterpreting it as a different format would be worse than skipping it),
+so a JBIG2-only scan page reports `UNSUPPORTED_SCANNED_PDF_LAYOUT`. JPEG
+(`DCTDecode`) and CCITT Group 3/4 fax (`CCITTFaxDecode`, the standard
+monochrome-scan encoding), plus raw raster (`FlateDecode`/`LZWDecode`
+across every common PDF color space), are fully decoded to a standard
+`image.Image`.
+
+**Scanned-PDF support boundary — the common case only.** The first
+implementation supports exactly one shape: **one dominant, full-page
+raster image per scanned page.** A page whose real content is genuine
+vector-drawn material (not a raster scan at all) — which would require
+true PDF page rendering, which this package does not implement — reports
+`UNSUPPORTED_SCANNED_PDF_LAYOUT` (surfaced as the fatal
+`PDF_PAGE_RENDER_REQUIRED` error from `ingestion/pdf`). **Correctly
+rejecting an unsupported scan is treated as strictly better than producing
+bad financial data** — this package never silently OCRs an arbitrary
+embedded logo or partial image as if it were the page.
+
+**Dominant-image selection (`dominant.go`) — never "pick the largest byte
+stream."** When a page contains multiple embedded images (a scan plus a
+letterhead logo is common), `SelectDominantImage` uses **aspect-ratio
+shape matching** against the PDF page's own `MediaBox` proportions as the
+deciding signal, not an assumed absolute DPI or raw pixel/byte volume: a
+genuine full-page scan has the same width:height ratio as its page
+regardless of scan resolution, while a logo/icon/stamp almost always has a
+very different one. (An earlier assumed-DPI area-projection design was
+tried and rejected during this implementation specifically because it
+conflated "a small logo" with "a genuinely low-resolution full-page scan"
+— both look small under a fixed-DPI area projection, but only aspect
+ratio correctly tells them apart independent of resolution.) A secondary
+absolute-pixel-size floor still rejects a tiny thumbnail that happens to
+share the page's proportions. Exactly one page-shaped candidate → that
+image is used; zero → `NO_DOMINANT_PAGE_IMAGE`; two or more equally
+plausible → `MULTIPLE_PAGE_IMAGES` (this package refuses to guess).
+
+### OCR modes (`ingestion/pdf`'s `ParseWithOCR`)
+
+```go
+func ParseWithOCR(ctx context.Context, r io.ReadSeeker, opts Options, engine ocr.Engine) (Results, *ingestion.Error)
+```
+
+`Options.OCR` selects one of three modes:
+
+- **`OCRDisabled`** (the zero value/default) — identical to `Parse`: an
+  image-only page/document returns `OCR_REQUIRED`. `ParseWithOCR` called
+  with this mode simply calls `Parse` internally; no behavior differs at
+  all from before this feature existed.
+- **`OCRAuto`** — tries embedded-text extraction first, for the *whole
+  document* (the same `hasUsableTextLayer` check `Parse` already uses).
+  Only pages that genuinely lack usable embedded text are OCR'd — a text
+  PDF **never** invokes the OCR engine at all under this mode (verified by
+  a dedicated test asserting zero engine calls). This is the mode that
+  supports **mixed PDFs**: some pages read via embedded text, some via
+  OCR, combined into one deterministic result with page provenance
+  preserved throughout, and `MIXED_TEXT_AND_OCR_PAGES` emitted when both
+  kinds of pages contributed to one document.
+- **`OCRForce`** — ignores any embedded text layer entirely and OCRs every
+  page's dominant image, regardless of whether usable embedded text
+  exists. A page with no extractable dominant image under this mode is a
+  fatal error for the whole parse (`OCRAuto`, by contrast, treats an
+  unreadable individual page as non-fatal — see below).
+
+**Per-page failure handling differs by mode.** Under `OCRAuto`, one
+page that cannot be OCR'd (ambiguous/missing dominant image) contributes
+no rows and is recorded via `NO_DOMINANT_PAGE_IMAGE`/
+`MULTIPLE_PAGE_IMAGES`, without failing the rest of the document. Under
+`OCRForce`, the same condition fails the entire parse — the caller
+explicitly asked for every page to be OCR'd.
+
+**Deterministic image preprocessing (`preprocess.go`).** `Options.Preprocess`
+(`PreprocessOptions`) controls three conservative, fully deterministic,
+individually testable steps, in a fixed order — grayscale conversion,
+linear min/max contrast stretch, and fixed-threshold binarization — every
+one **off by default** ("do not over-process by default"). No ML-based
+image enhancement anywhere. Deskew/rotation-correction was deliberately
+**not** implemented: a robust, safe deskew algorithm is neither trivial
+nor conservative to hand-roll, and this repository's row-grouping Y
+-tolerance already absorbs the mild skew a real scan typically exhibits
+(see `scanned_skewed.pdf`'s fixture test) without needing an explicit
+correction step — see Known OCR limitations below.
+
+**Resolution/DPI.** Once a dominant image is selected, its effective
+resolution is computed directly and exactly (`estimateDPI` — the page's
+known point dimensions against the image's actual pixel dimensions,
+distinct from `pdfimage`'s resolution-*independent* aspect-ratio
+selection heuristic, which deliberately avoids assuming any DPI at
+selection time). A page estimated below 150 DPI (Tesseract's own
+documented reliability threshold) still gets OCR'd, but is flagged
+`LOW_OCR_RESOLUTION` — resizing/upscaling is not performed by this
+package, since it would not create missing source detail and could
+misleadingly suggest higher confidence than the source data supports.
+
+### OCR numeric safety
+
+Financial-number OCR errors are treated as high-risk by design (per the
+task's explicit warning about `0`↔`O`, `1`↔`I`↔`l`, `5`↔`S`, `8`↔`B`,
+`,`↔`.`, and missed parentheses/minus signs). `ocr_numeric.go` implements
+**exactly one** narrow, deterministic, context-sensitive correction rule,
+never aggressive global character substitution:
+
+1. `tabular.ParseNumeric` (the *same, unmodified* numeric parser CSV/
+   XLSX/text-PDF already use) is tried on the raw OCR text first. A cell
+   that already parses cleanly is **never** touched, even if it contains
+   a letter elsewhere in the row.
+2. Only on failure, and only for text that is whole-cell numeric-*shaped*
+   with confusable letters (`reNumericShapeWithLetters` — optional
+   `$`/`(` prefix, a run of digits/confusable-letters/commas/periods,
+   optional trailing `)`/`%`/minus, nothing else — a label like "Cost of
+   Goods Sold" never matches this and is never touched), a substitution
+   table (`O`/`o`→`0`, `I`/`l`/`i`→`1`, `S`/`s`→`5`, `B`→`8`) is applied
+   and the **same unmodified** `tabular.ParseNumeric` is tried again on
+   the corrected text.
+3. If the correction succeeds, the corrected value is used and
+   `OCR_NUMERIC_CORRECTED` is emitted. If it still fails, the cell is
+   left completely unparsed (`Cell.Parsed == false`, `Cell.Numeric ==
+   nil`) and `OCR_NUMERIC_AMBIGUOUS` is emitted instead of the generic
+   `UNPARSEABLE_NUMERIC_CELL` a plain parse failure would produce —
+   **this package never invents a value it cannot deterministically
+   justify.**
+
+`Cell.Raw`/`OCRProvenance.OriginalText` always preserve the **uncorrected**
+OCR text regardless of outcome, so a future review UI can show exactly
+what the engine reported alongside whatever value (if any) was derived
+from it.
+
+### OCR provenance and review metadata
+
+`ingestion.Cell` gained an optional `OCR *OCRProvenance` field (nil for
+CSV/XLSX and for any PDF cell read via the embedded-text path), carrying
+`OriginalText`, `Confidence` (the *minimum* across every OCR word
+contributing to that cell — a cell is only as trustworthy as its
+least-confident constituent word), `NumericCorrected`, `ReviewRecommended`
+(a single boolean summary of confidence/correction/ambiguity signals, so a
+consuming review UI doesn't need to reimplement this package's own
+threshold logic), and `PixelBounds` (the cell's bounding box on the
+*source scanned image*, in image pixel coordinates — distinct from the
+existing `CellBounds`, which is still populated alongside it in PDF
+points). `ingestion.Row.PageIndex`/`Cell.Bounds` (already existing PDF
+provenance) are populated identically for OCR-derived rows.
+
+`ingestion.Metadata` gained an optional `OCR *OCRMetadata` (nil unless OCR
+was used), summarizing: whether OCR was used, which pages were OCR'd vs.
+read via embedded text, engine name/version, average confidence
+(**informational only — never a guarantee of accounting correctness**; a
+high average can coexist with one badly misread critical number, which is
+exactly why per-cell provenance and the `LowConfidence*`/
+`OCR_NUMERIC_AMBIGUOUS` warnings exist rather than relying on this single
+aggregate), low-confidence-numeric-cell count, and unsupported-scan-page
+count.
+
+### OCR-specific limits/security
+
+`ingestion.Limits` gained seven additive OCR-only fields (zero value =
+`DefaultLimits()`, identical pattern to every existing limit):
+`MaxOCRPages` (default 50), `MaxImagePixels` (default 50,000,000 — a
+defensive bound against a decompression-bomb-style oversized raster
+embedded in an untrusted PDF), `MaxImageDimension` (default 10,000px, an
+independent per-axis bound), `MaxOCRWords` (default 200,000),
+`MaxOCRTextBytes` (default 10 MiB), `OCRPageTimeoutSeconds` (default 60),
+and `OCRTotalTimeoutSeconds` (default 600). Exceeding a page/image bound
+is a fatal `OCR_PAGE_LIMIT_EXCEEDED`/`OCR_IMAGE_LIMIT_EXCEEDED`; exceeding
+a timeout is `OCR_TIMEOUT`. `ParseWithOCR`'s `ctx context.Context`
+parameter bounds the whole call independently of these limits.
+
+### OCR warning/error taxonomy — extended, not duplicated
+
+New `WarningCode` values (same `ingestion.WarningCode` taxonomy every
+other format already uses): `OCR_USED`, `LOW_OCR_RESOLUTION`,
+`LOW_CONFIDENCE_LABEL`, `LOW_CONFIDENCE_NUMERIC_VALUE`,
+`OCR_NUMERIC_CORRECTED`, `OCR_NUMERIC_AMBIGUOUS`, `MULTIPLE_PAGE_IMAGES`,
+`NO_DOMINANT_PAGE_IMAGE`, `MIXED_TEXT_AND_OCR_PAGES`,
+`UNSUPPORTED_EMBEDDED_IMAGE`. New `ErrorCode` values:
+`OCR_ENGINE_UNAVAILABLE`, `OCR_ENGINE_FAILED`, `OCR_TIMEOUT`,
+`OCR_PAGE_LIMIT_EXCEEDED`, `OCR_IMAGE_LIMIT_EXCEEDED`,
+`SCANNED_PAGE_IMAGE_UNAVAILABLE`, `PDF_PAGE_RENDER_REQUIRED`. The
+pre-existing `OCR_REQUIRED` error's meaning is unchanged for `Parse`/
+`OCRDisabled`; it is simply now escapable via `OCRAuto`/`OCRForce`.
+
+### OCR fixture corpus and testability
+
+Every OCR code path is fully unit-testable without Tesseract installed,
+via `ocr.FakeEngine` (see `ingestion/ocr` above). `ingestion/fixtures/gen`
+gained `scan_image.go` (renders synthetic financial-statement-shaped text
+onto a raster canvas using only the standard library plus
+`golang.org/x/image/font`'s `basicfont`, then JPEG-encodes it — zero
+external asset files) and `generate_ocr_pdf.go`, which embeds these
+synthetic scans as JPEG XObjects into hand-rolled PDFs (extending
+`pdf_writer.go` with image-XObject support), producing: `scanned_pl.pdf`,
+`scanned_balance_sheet.pdf`, `scanned_low_resolution.pdf` (deliberately
+half-resolution), `scanned_skewed.pdf` (each line shifted slightly right),
+`scanned_negative_parentheses.pdf`, `scanned_multi_year.pdf`,
+`scanned_multi_page.pdf`, `mixed_text_and_scanned.pdf` (real embedded
+text on page 1, a genuine scan on page 2), `scanned_with_logo.pdf` (two
+embedded images: a small logo plus the dominant page scan), and
+`scanned_ambiguous_numeric.pdf` (a deliberate letter-for-digit OCR
+ambiguity in the fixture's own rendered text, for real-Tesseract testing).
+No proprietary/customer data, matching the existing CSV/XLSX/text-PDF
+corpus's identical constraint.
+
+Real-Tesseract integration tests (`ingestion/ocr/tesseract/
+integration_test.go` and `ingestion/pdf/ocr_tesseract_integration_test.go`)
+run conditionally: `Skip("SKIPPED — tesseract executable not installed")`
+when no executable resolves, a real end-to-end OCR pass against the
+synthetic fixtures when one does. Every other OCR test always runs.
+
+### Known OCR limitations
+
+- **No deskew/rotation correction** — only mild skew (absorbed by the
+  existing row-grouping Y-tolerance) is tolerated; a significantly rotated
+  scan is not corrected.
+- **JBIG2-encoded scans are not supported** (`pdfimage`'s `extract.go` —
+  `pdfcpu` returns a raw undecoded stream for this filter, and this
+  package does not add a JBIG2 decoder). CCITT Group 4 fax and JPEG,
+  the two most common real-world scan encodings, are both fully supported.
+- **True vector-rendered scanned-looking pages require full PDF page
+  rendering**, which this package does not implement — reported as
+  `PDF_PAGE_RENDER_REQUIRED` rather than guessed at.
+- **English only** for this MVP (`ingestion/ocr/tesseract`'s language-pack
+  scope) — multi-language support would need the caller's own Tesseract
+  installation to have the relevant language-data packages available,
+  which this package does not manage.
+- **OCR confidence is engine-specific and uncalibrated** — never usable as
+  a statistical guarantee, only as a relative, per-engine signal (see
+  `ingestion/ocr`'s package doc comment).
+- **Letter-digit numeric correction (`ocr_numeric.go`) does not extend to
+  period/header text** — a year header misread with a letter confusion
+  (e.g. "2O25" for "2025") is not corrected, only numeric VALUE cells are
+  (deliberately: correcting a period label risks silently reassigning a
+  value to the wrong reporting period, a materially different and riskier
+  kind of mistake than a numeric value simply failing to parse — see
+  `WarnPeriodLabelAmbiguous`, which still fires for an uncorrected
+  unparseable header exactly as it already does for CSV/XLSX/text-PDF).
+- **`golang.org/x/image/tiff`** (BSD-3-Clause, already part of this
+  repository's dependency tree via `golang.org/x/image`) is used to decode
+  a `pdfcpu`-extracted TIFF-format image when that's the format `pdfcpu`
+  chose to render a particular embedded filter/color-space combination to
+  — see `pdfimage/extract.go`'s `decodeImage`.
 
 ### `financial`
 
@@ -2831,9 +3232,11 @@ go build ./...
 go test -race ./...
 ```
 
-Regenerate the binary CSV/XLSX/PDF fixtures (only needed when a fixture's
-shape changes — see [`ingestion/pdf`](#ingestionpdf)'s Fixture corpus for
-why PDF fixtures are hand-generated rather than checked-in-only):
+Regenerate the binary CSV/XLSX/PDF/scanned-PDF fixtures (only needed when
+a fixture's shape changes — see [`ingestion/pdf`](#ingestionpdf)'s Fixture
+corpus for why PDF fixtures are hand-generated rather than
+checked-in-only, and [Scanned/image PDF support (OCR)](#scannedimage-pdf-support-ocr)'s
+fixture corpus section for the scanned-PDF fixtures specifically):
 
 ```bash
 go run ./ingestion/fixtures/gen
@@ -2878,17 +3281,20 @@ The next steps are integration, not new packages:
    historical records tied to its own account/client/valuation entities.
    This repository defines the shapes; it does not decide how they're
    stored.
-2. **Document parsing.** CSV/XLSX tabular ingestion and text-based
-   (born-digital) PDF ingestion are now covered by `ingestion` and
-   `ingestion/pdf` (see [`ingestion`](#ingestion) and
-   [`ingestion/pdf`](#ingestionpdf) above). Turning a **scanned or
-   image-only PDF** into `[]financial.RawLineItem` is still exactly the
-   OCR/document-understanding problem this repository's "no OCR"
-   constraint rules out — `ingestion/pdf` already detects this case
-   deterministically and returns `OCR_REQUIRED` rather than guessing; see
-   [Recommended next phase: scanned/image PDF support (OCR)](#recommended-next-phase-scannedimage-pdf-support-ocr)
-   for why OCR is the natural next step once it's needed, and why it's
-   deliberately not started here.
+2. **Document parsing.** CSV/XLSX tabular ingestion, text-based
+   (born-digital) PDF ingestion, AND scanned/image-only PDF ingestion (via
+   local Tesseract OCR, entirely opt-in) are now all covered by
+   `ingestion`, `ingestion/pdf`, `ingestion/ocr`, `ingestion/ocr/tesseract`,
+   and `ingestion/pdf/pdfimage` — see [`ingestion`](#ingestion),
+   [`ingestion/pdf`](#ingestionpdf), and
+   [Scanned/image PDF support (OCR)](#scannedimage-pdf-support-ocr) above.
+   What remains out of scope is a review UI for low-confidence OCR rows
+   (the domain metadata to support one — `OCRProvenance`,
+   `ReviewRecommended`, per-cell confidence — already exists; only the UI
+   itself is not built here) and any AI/LLM-based OCR correction or
+   document understanding, which would reintroduce exactly the kind of
+   unaudited non-determinism this repository's design has consistently
+   avoided.
 3. **HTTP/API and UI.** `report.Report` is JSON-serializable specifically
    so a future API handler can return it directly and a future Vue UI (or
    any other frontend) can render it — building either is explicitly out
@@ -3093,32 +3499,20 @@ handle in the meantime:
 [`ingestion/pdf`](#ingestionpdf)'s own "Known PDF-specific limitations"
 subsection, to keep PDF-only detail out of this CSV/XLSX-focused list.
 
-## Recommended next phase: scanned/image PDF support (OCR)
+## Recommended next phase
 
-With CSV, XLSX, and text-based PDF all covered, the one remaining
-realistic financial-statement source this repository does not read is a
-**scanned or image-only PDF** — one with no embedded text layer at all,
-which [`ingestion/pdf`](#ingestionpdf) already detects deterministically
-and reports as `OCR_REQUIRED` (see that section) rather than guessing.
-Closing this gap requires OCR, which is explicitly out of scope for this
-repository per
-[What this project intentionally does not contain](#what-this-project-intentionally-does-not-contain):
-OCR introduces exactly the non-deterministic, model-based uncertainty this
-repository's entire design has been structured to avoid. Should a future
-module take this on, it should preserve the same boundary `ingestion` and
-`ingestion/pdf` established here: OCR-derived text extraction stays
-isolated in its own package (a natural home would be alongside or inside
-`ingestion/pdf`, since it would still need to feed the exact same
-row/column reconstruction — `layout.go`/`columns.go` — this package
-already implements once text exists, rather than reimplementing that
-logic a second time), produces the same `ingestion.Result`/`Row`/`Cell`
-shapes this package already defines rather than a competing model, and
-still performs zero classification of its own — every row it extracts
-flows into the exact same `financial/classification` boundary CSV, XLSX,
-and text-PDF rows do today. Whatever OCR engine is chosen will be the
-first genuinely non-deterministic component in this repository's
-ingestion layer (image-to-text is inherently probabilistic, unlike
-everything documented above it), so it should be treated as a distinct
-trust boundary from day one — e.g. surfacing OCR confidence scores
-per-row rather than presenting OCR output with the same
-"deterministic and explainable" guarantee the rest of `ingestion` offers.
+With CSV, XLSX, text-based PDF, and now scanned/image-only PDF (via local
+Tesseract OCR — see [Scanned/image PDF support (OCR)](#scannedimage-pdf-support-ocr))
+all covered, deterministic ingestion of every realistic financial
+-statement source format this repository targets is in place. The
+remaining gaps are the ones this repository has consistently scoped out at
+every phase (see
+[What this project intentionally does not contain](#what-this-project-intentionally-does-not-contain)):
+a persistence layer, HTTP/API handlers and auth, a review UI for
+low-confidence OCR rows/values (the domain metadata to support one —
+`OCRProvenance.ReviewRecommended`, per-cell confidence, original text — is
+already in place; only the UI itself is out of scope here), and AI/LLM
+assistance of any kind (document understanding, OCR correction,
+classification, or otherwise). Each remains a natural candidate for a
+future module built on top of the types and packages already defined here,
+but none should be started as part of this repository's own scope.
