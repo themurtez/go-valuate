@@ -263,6 +263,7 @@ go-valuate/
   analytics/revenuequality/  revenue composition, growth/volatility, customer retention, concentration
   analytics/concentration/   customer/vendor concentration risk: shares, HHI, dependency changes, loss scenarios
   analytics/anomalies/       expense anomaly / margin-leakage detection: deterministic spike/variance/pattern rules
+  analytics/variance/        budget/forecast/prior-period vs. actual variance: line/category/bridge analysis
   valuation/                 common valuation result envelope (value types, bridge, issues)
   valuation/sde/              SDE multiple method
   valuation/ebitda/           EBITDA multiple method
@@ -3105,6 +3106,133 @@ repeated values, duplicate-like cross-account amounts, owner/discretionary
 share, unexpected negative amounts, account grouping, custom thresholds,
 and JSON/determinism) exercised against hand-built fixtures.
 
+### `analytics/variance`
+
+A deterministic **budget/forecast/prior-period vs. actual variance
+analysis**: line-level, category-level, and total reconciliation between
+actual financial results and any caller-supplied baseline.
+
+Like `analytics/concentration` (and unlike the dataset-bound
+`analytics/qoe`/`workingcapital`/`cashflow`/`revenuequality`/`anomalies`),
+this package is independent of `financial.FinancialDataset` — a budget or
+forecast is frequently produced and stored entirely outside any financial
+dataset this repository would see (a spreadsheet budget, an FP&A tool's
+forecast export). It defines its own portable
+`LineObservation{AccountCode, Period, Actual, Baseline, BaselineType}`
+tuple. `AccountCode` is still a `financial.Code` (not a bare string)
+because favorable/unfavorable classification is genuinely
+taxonomy-dependent: a revenue account beating its baseline is favorable, an
+expense account exceeding its baseline is unfavorable — the same dollar
+sign means opposite things depending on the account. `financial.
+CodesByCategory` supplies this default; a caller can pin a specific code's
+direction via `Policy.DirectionOverrides`, taking precedence over the
+category default.
+
+Every function is pure — no I/O, no mutation of caller-owned input — and
+`Calculate` returns byte-for-byte identical JSON across repeated runs
+against identical input, regardless of Go's randomized map iteration order.
+
+```go
+res := variance.Calculate(variance.Input{
+    Lines: []variance.LineObservation{
+        {AccountCode: financial.CodeRevProduct, Period: "2025", Actual: 610_000,
+            BaselineAvailable: true, Baseline: 560_000, BaselineType: variance.BaselineTypeBudget},
+        {AccountCode: financial.CodeOpexMarketing, Period: "2025", Actual: 35_000,
+            BaselineAvailable: true, Baseline: 30_000, BaselineType: variance.BaselineTypeBudget},
+    },
+    PeriodMeta: map[financial.Period]variance.PeriodInfo{
+        "2025": {Type: variance.PeriodTypeFiscalYear, FiscalYear: 2025},
+    },
+    Policy: variance.Policy{MaterialAmountThreshold: 10_000},
+})
+
+for _, lv := range res.LineVariances {
+    fmt.Println(lv.AccountCode, lv.Favorability, lv.AbsoluteVariance.Value)
+}
+fmt.Println(res.Bridge.TotalVariance)
+```
+
+#### Favorable/unfavorable direction
+
+Every `financial.CategoryRevenue` code defaults to "an increase is
+favorable"; every `financial.CategoryCogs`/`CategoryOpex` code defaults to
+"an increase is unfavorable." `financial.CategoryOtherIncomeStatement`
+mixes true income lines with expense lines, so this package resolves each
+of its codes individually rather than treating the category uniformly:
+`CodeInterestIncome`/`CodeOtherIncome` default favorable-on-increase;
+`CodeDepreciation`/`CodeAmortization`/`CodeInterestExpense`/
+`CodeIncomeTax`/`CodeOtherExpense` default unfavorable-on-increase.
+Balance-sheet codes (and any code the taxonomy does not recognize) have no
+default direction and are reported `FavorabilityUnknown` — recorded as an
+advisory `UNKNOWN_ACCOUNT_CODE` warning — unless a caller supplies a
+`Policy.DirectionOverrides` entry for that specific code. This package's
+direction rule is a plain sign comparison on `Actual - Baseline`; it does
+not special-case a negative amount on an otherwise-conventional revenue or
+expense code (see `financial/metrics`' non-negative sign convention and
+`anomalies.RuleUnexpectedNegativeAmount`) — a caller feeding out-of-
+convention negative amounts still gets a correct arithmetic
+`AbsoluteVariance`, but `Favorability` follows the same plain sign rule
+regardless.
+
+#### Materiality
+
+`Policy.MaterialAmountThreshold`/`MaterialPercentOfBaseline` follow
+`review.IsMaterial`'s exact OR-of-two-legs, off-by-default design: a
+variance is material if its unsigned amount is at or above
+`MaterialAmountThreshold`, or (`MaterialPercentOfBaseline > 0` and the
+baseline is available and nonzero) the unsigned amount is at or above that
+fraction of `|Baseline|`. Both default to 0, so materiality gating is off
+by default — a caller must opt in explicitly, exactly like
+`review.DefaultPolicy`.
+
+#### What `Result` contains
+
+| Field | What it is |
+|---|---|
+| `LineVariances` | One entry per input line: `AbsoluteVariance`, `PercentVariance` (unavailable on a zero baseline — see `VarianceFromZeroBase`), `Favorability`, `Materiality`. Ordered by `Period` (chronological when `PeriodMeta` covers it), then `AccountCode`. |
+| `CategorySummaries` | Roll-up by `financial.CodeCategory`, sorted by category. |
+| `CustomCategorySummaries` | Roll-up by the caller's own `LineObservation.Category` label (e.g. a department or cost center), independent of taxonomy category. |
+| `TopFavorable` / `TopUnfavorable` | The `Policy.TopN` largest-dollar-impact lines in each direction. |
+| `MaterialExceptions` | Every `MaterialityMaterial` line, each with `ContributionToTotalVariance` (share of `Bridge.TotalAbsoluteVariance`). |
+| `PeriodTrends` / `TrendSummary` | Per-period aggregate variance and a first-vs-last direction characterization — unavailable without `Input.PeriodMeta`. |
+| `Bridge` | The total actual-vs-baseline reconciliation: `TotalActual`, `TotalBaseline`, `TotalVariance`, `FavorableVariance` + `UnfavorableVariance` (which sum back to `TotalVariance` whenever every contributing line has a known `Favorability`). |
+| `Warnings` / `Errors` | Structured `Issue`s (own `IssueCode` system — see [Error taxonomy](#error-taxonomy)) for input-level problems (`NO_LINES`, `MISSING_BASELINE`, `MISSING_BASELINE_TYPE`, `UNKNOWN_ACCOUNT_CODE`, `NO_PERIOD_META`, `PERIOD_MISSING_FROM_META`). |
+
+A line with `BaselineAvailable == false` (no budget/forecast/prior-period
+figure exists for that account/period) still appears in `LineVariances`
+with its `Actual` intact, but every variance figure is left `Unavailable`
+and it is excluded from `Bridge` — a missing baseline is never silently
+treated as a $0 baseline.
+
+#### Exported surface, by file
+
+- **`types.go`** — `Input`, `Policy`/`DefaultPolicy()`, `Result`,
+  `PeriodInfo`/`PeriodType`, `LineObservation`, `BaselineType`,
+  `DirectionOverride`, `VarianceValue`/`Unavailable`/`AvailableValue`,
+  `Favorability`, `Materiality`, `LineVariance`, `CategorySummary`,
+  `TrendDirection`/`TrendFlatBandPercent`, `PeriodTrend`, `TrendSummary`,
+  `MaterialException`, `Bridge`, `IssueCode`/`IssueSeverity`/`Issue`,
+  `HasErrors`, `FormulaVersion`.
+- **`variance.go`** — `Calculate(Input) Result`: per-line variance and
+  favorability/materiality classification, plus `directionIndex` (taxonomy-
+  category defaults, the mixed other-income-statement rule, and
+  `DirectionOverrides` precedence) and `isMaterial`.
+- **`periods.go`** — chronological-ordering helpers (mirroring
+  `concentration.chronologicalPeriods`), `sortLineVariances`,
+  `buildCategorySummaries`, `topFavorable`/`topUnfavorable`, `buildBridge`,
+  `buildMaterialExceptions`, `buildPeriodTrends`, `buildTrendSummary`.
+
+See [`analytics/variance/variance_test.go`](analytics/variance/variance_test.go),
+[`analytics/variance/determinism_test.go`](analytics/variance/determinism_test.go),
+and [`analytics/variance/roundtrip_test.go`](analytics/variance/roundtrip_test.go)
+for every scenario the task requires (revenue, expense, COGS, zero
+baseline, negative values, missing baseline, missing baseline type,
+unknown account codes with and without a `DirectionOverrides` entry,
+multiple periods with and without `PeriodMeta`, category rollup, custom
+category rollup, top favorable/unfavorable, materiality by amount and by
+percent, the bridge reconciliation identity, and JSON/determinism)
+exercised against hand-built fixtures.
+
 ### `valuation`
 
 Implements the individual valuation methods themselves: SDE multiple,
@@ -4278,6 +4406,7 @@ persist historical valuations").
 | Revenue-quality analysis formulas | `revenuequality.FormulaVersion`, echoed on `revenuequality.Result.FormulaVersion` | The recurring/non-recurring revenue split, the `Statistics`/`Trend`/`CAGRResult`/`VolatilityResult` formulas, the customer-transition (new/lost/retained/expansion/contraction) formulas, the `ConcentrationSummary`/HHI formula, and the `DefaultThresholds` flag-trigger rules (`analytics/revenuequality`) |
 | Concentration analysis formulas | `concentration.FormulaVersion`, echoed on `concentration.Result.FormulaVersion` | The top-N-share/HHI formulas, the entity-ranking and `DependencyChange` methodology, the lost-entity/top-N-loss `Scenario` formulas (including the optional earnings-impact conversion), and the `DefaultThresholds` flag-trigger rules (`analytics/concentration`) |
 | Anomaly detection rules | `anomalies.FormulaVersion`, echoed on `anomalies.Result.FormulaVersion` | Every `RuleCode`'s exact comparison method (spike/variance/growth-gap/margin/materiality/gap/duplicate/sign/negative-amount detection) and the `DefaultThresholds` trigger points (`analytics/anomalies`) |
+| Variance analysis formulas | `variance.FormulaVersion`, echoed on `variance.Result.FormulaVersion` | The absolute/percentage variance formulas, the favorable/unfavorable direction rules (taxonomy-category defaults, the mixed other-income-statement per-code rule, and `DirectionOverrides` precedence), the materiality test, the contribution-to-total-variance formula, the category rollup, and the period-trend formula (`analytics/variance`) |
 | AI request/response schema | `ai.RequestSchemaVersion`, echoed on `ai.Provenance.RequestSchemaVersion` | The `Request`/`Response` wire shape `financial/classification/ai` sends to/expects from a `Classifier` |
 | AI fallback orchestration | `ai.OrchestrationVersion`, echoed on `ai.Provenance.OrchestrationVersion` | The trigger/fallback/safety decision logic in `ClassifyWithFallback`/`ClassifyBatchWithFallback` (which `FallbackMode` runs AI when, structural-row skipping, disagreement handling) |
 | OpenAI adapter (classification) | `openai.AdapterVersion`, echoed on `ai.Provenance.AdapterVersion` | This specific provider adapter's prompt-construction/response-parsing logic (`financial/classification/ai/openai`) |
@@ -4340,6 +4469,12 @@ unverified incidental property of the standard library).
 | `anomalies.Result.Anomalies` | By `Period` (chronologically when `Input.PeriodMeta` covers every period, else `financial.FinancialDataset.Periods()`'s lexical order), then by `RuleCode` declaration order, then by `Account` string — a real `sort.SliceStable` (`anomalies`'s `sortAnomalies`), never left to `Calculate`'s internal per-rule append order |
 | `anomalies.Summary.ByRule` / `BySeverity` | `RuleCode` declaration order / fixed `info`, `warning`, `critical` order — never Go map order (`analytics/anomalies`'s `buildSummary`) |
 | `anomalies.Anomaly.RelatedPeriods` (on `REPEATED_UNUSUAL_VALUE`/`DUPLICATE_LIKE_AMOUNTS` anomalies) | Sorted by `Period` string ascending |
+| `variance.Result.LineVariances` | By `Period` (chronologically when `Input.PeriodMeta` covers every period present, else lexical `Period` order), then by `AccountCode` ascending, stable on original input order for ties (`analytics/variance`'s `sortLineVariances`) |
+| `variance.Result.CategorySummaries` / `CustomCategorySummaries` | Sorted by `Category` string ascending |
+| `variance.Result.TopFavorable` | Descending by `AbsoluteVariance.Value` (largest favorable dollar impact first), ties broken by `AccountCode` then `Period` |
+| `variance.Result.TopUnfavorable` | Ascending by `AbsoluteVariance.Value` (most negative-impact-magnitude first), ties broken by `AccountCode` then `Period` |
+| `variance.Result.MaterialExceptions` | Same order as `LineVariances`, filtered to `MaterialityMaterial` |
+| `variance.Result.PeriodTrends` | Chronological when `Input.PeriodMeta` covers every period present; falls back to lexical `Period` order when `PeriodMeta` is nil/partial (`analytics/variance`) |
 
 ## Error taxonomy
 
@@ -4457,6 +4592,23 @@ message strings:
   `AnomalySeverity`'s own doc comment), mirroring
   `qoe.FlagCode`/`ratios.SignalCode`/`cashflow.FlagCode`/
   `revenuequality.FlagCode`'s identical input-problem/quality-signal split.
+- **`variance.Issue{Code variance.IssueCode, Severity, Message}`** —
+  `analytics/variance`'s own separate system (`NO_LINES`,
+  `MISSING_BASELINE`, `MISSING_BASELINE_TYPE`, `UNKNOWN_ACCOUNT_CODE`,
+  `NO_PERIOD_META`, `PERIOD_MISSING_FROM_META`), for the same reason as
+  every other `analytics/` sibling above: an input-level variance-analysis
+  problem is its own problem domain, distinct from its siblings despite the
+  identical `Available`/`Warnings`/`Errors` shape.
+  `MISSING_BASELINE`/`MISSING_BASELINE_TYPE`/`UNKNOWN_ACCOUNT_CODE` are all
+  advisory only — a line missing a baseline, missing a `BaselineType`
+  label, or carrying an unrecognized `financial.Code` still contributes
+  every other output it can (see `analytics/variance`'s own README section
+  for exactly what stays available in each case). Unlike its `analytics/`
+  siblings, `variance` does not define a separate `FlagCode`/rule
+  vocabulary: `Favorability` and `Materiality` are per-line classification
+  fields computed unconditionally for every line (not conditional signals
+  that may or may not fire), so there is no analogous "quality signal"
+  layer to split out.
 - **`ai.Issue{RowID, Code ai.IssueCode, Severity, Message}`** —
   `financial/classification/ai`'s own separate system (`AI_DISABLED`,
   `AI_PROVIDER_UNAVAILABLE`, `AI_TIMEOUT`, `AI_PROVIDER_ERROR`,
