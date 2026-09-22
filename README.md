@@ -39,8 +39,11 @@ Deterministic, rule/alias-based classification (deciding *which* canonical
 code a raw row maps to) is implemented in `financial/classification`;
 dataset-internal-consistency checking is implemented in
 `financial/reconciliation`; derived financial metrics (EBITDA, SDE, working
-capital, growth/volatility, etc.) are implemented in `financial/metrics` —
-see below for all three. Discretionary adjustments/add-backs, valuation
+capital, growth/volatility, etc.) are implemented in `financial/metrics`;
+explicit normalization adjustments and the normalized EBITDA/SDE bridges
+built from them are implemented in `financial/adjustments`; selecting a
+single maintainable-earnings figure across historical periods is
+implemented in `financial/earnings` — see below for all five. Valuation
 formulas (SDE/EBITDA multiples, DCF, adjusted net asset value, etc.),
 AI/LLM-assisted or statistical classification, AI-assisted extraction,
 PDF/XLSX/CSV parsing, and persistence are all still explicitly **out of
@@ -57,6 +60,8 @@ go-valuate/
   financial/classification/  deterministic raw-row -> canonical-code classifier
   financial/reconciliation/  dataset internal-consistency checks
   financial/metrics/         centralized derived-metrics engine (EBITDA, SDE, trends, ...)
+  financial/adjustments/     explicit normalization adjustments -> normalized EBITDA/SDE bridges
+  financial/earnings/        maintainable-earnings selection across historical periods
   settings/                  generic hierarchical settings resolver
   fixtures/                  example JSON matching the Go types, used by tests
                              as living documentation
@@ -346,7 +351,7 @@ a pre-negated sign.
 | `EBIT` | `GrossProfit - TotalOpex` |
 | **`EBITDA`** | **`EBIT + Depreciation + Amortization`** — missing `DEPRECIATION`/`AMORTIZATION` codes contribute `0` (many statements bury D&A inside COGS/OPEX without a separate line), so `EBITDA` stays available whenever `EBIT` is, even with no D&A broken out. |
 | `EBITDAMargin` | `EBITDA / TotalRevenue` (unavailable if `TotalRevenue == 0`) |
-| **`SDE`** | **`EBITDA + OPEX_OWNER_COMP`** — Seller's Discretionary Earnings, the total financial benefit available to a single working owner-operator. Owner compensation is added back because `EBITDA` already deducted it as an operating expense, but SDE by definition includes it. **This module implements no further discretionary add-backs** (personal vehicle expenses run through the business, one-time legal settlements, above-market related-party rent, etc.) beyond `OPEX_OWNER_COMP` — a later adjustments module owns that. Treat this `SDE` as a baseline. |
+| **`SDE`** | **`EBITDA + OPEX_OWNER_COMP`** — Seller's Discretionary Earnings, the total financial benefit available to a single working owner-operator. Owner compensation is added back because `EBITDA` already deducted it as an operating expense, but SDE by definition includes it. **This module implements no further discretionary add-backs** (personal vehicle expenses run through the business, one-time legal settlements, above-market related-party rent, etc.) beyond `OPEX_OWNER_COMP` — `financial/adjustments` owns that layer, applied on top of this baseline `SDE`/`EBITDA`. Treat this `SDE` as a baseline. |
 | `NetIncome` | `EBIT + OTHER_INCOME + INTEREST_INCOME - INTEREST_EXPENSE - OTHER_EXPENSE - INCOME_TAX` — every below-the-line code absent from the dataset contributes `0` rather than making the whole figure unavailable, since most small-business statements below the operating-income line are sparse. |
 | `CurrentAssets` | `BS_CASH + BS_ACCOUNTS_RECEIVABLE + BS_INVENTORY + BS_PREPAID + BS_CURRENT_ASSET_OTHER` |
 | `CurrentLiabilities` | `BS_ACCOUNTS_PAYABLE + BS_CURRENT_LIABILITY_OTHER + BS_SHORT_TERM_DEBT` |
@@ -538,6 +543,264 @@ Balance sheet:
 Dataset-level integrity (structural only — no business judgement):
 
 - `DATASET_NOT_EMPTY`, `VALID_CURRENCY`, `FINITE_NUMERIC_VALUES` (rejects `NaN`/`±Inf`), `NO_DUPLICATE_ENTRIES` (duplicate `(code, period)` pairs that should have been aggregated away by `Normalize`), `NO_UNKNOWN_PERIOD_REFERENCES` (empty period or unrecognized `financial.Code`), `NO_SUSPICIOUS_DUPLICATE_SOURCES` (the same source row referenced twice within one aggregate's provenance), `INCOME_STATEMENT_HAS_REVENUE` and `BALANCE_SHEET_HAS_LIABILITIES_OR_EQUITY` (warn on lopsided/incomplete statements without treating an income-statement-only or balance-sheet-only dataset as inherently invalid).
+
+### `financial/adjustments`
+
+Models explicit, human-supplied normalization adjustments (owner
+compensation normalization, personal expenses run through the business,
+one-time items, related-party rent, non-operating income/gains/losses) and
+applies them to a `metrics.Snapshot` to produce transparent, auditable
+**normalized EBITDA** and **normalized SDE** bridges.
+
+This package does not decide which adjustments exist for a given business,
+does not store them, and does not know who created them or where they came
+from — `Adjustment.SourceRef` is an opaque caller-supplied string, exactly
+like `reconciliation`'s treatment of reported totals. `Apply` never
+mutates its inputs and performs no I/O.
+
+```go
+result := adjustments.Apply(snapshot, []adjustments.Adjustment{
+    {
+        ID: "adj-1", Period: "2025", Type: adjustments.TypePersonalVehicle,
+        Amount: 7200, Reason: "owner's personal truck lease run through the business",
+        Included: true,
+    },
+    {
+        ID: "adj-2", Period: "2025", Type: adjustments.TypeOwnerCompensationNormalization,
+        Amount: 32000, Effect: adjustments.EffectDecrease, Targets: []adjustments.Target{adjustments.TargetSDE},
+        Reason: "normalize $92k actual draw to a $60k market-rate replacement salary",
+        Included: true,
+    },
+})
+fmt.Println(result.EBITDABridge.NormalizedValue)
+fmt.Println(result.SDEBridge.NormalizedValue)
+```
+
+#### Sign convention: magnitude + explicit direction, never a signed delta
+
+Every `Adjustment` carries a **non-negative `Amount`** (a magnitude) plus an
+explicit **`Effect`** (`EffectIncrease` or `EffectDecrease`) stating whether
+applying it makes the target metric larger or smaller. There is no signed
+"delta" anywhere in this package's public API — a bare `-50000` forces every
+caller and reviewer to separately remember whether negative means "this
+expense is being added back" or "this reduces earnings," and that
+convention is exactly the kind of thing that gets flipped by accident.
+"Remove non-operating income" is `Amount: 75000, Effect: EffectDecrease`,
+never `Amount: -75000`.
+
+`Validate` deliberately does **not** reject a negative `Amount` outright, or
+reject an adjustment because its net effect reduces earnings — only
+non-finite amounts are rejected on the amount itself. Legitimate
+adjustments (removing non-operating income, normalizing above-market
+related-party rent down to fair value) are expected to *decrease* normalized
+earnings; treating "decreases the number" as inherently suspect would be
+wrong.
+
+#### Adjustment types and their defaults
+
+Each `Type` carries default `Targets` (which bridge(s) it applies to) and a
+default `Effect`, both overridable per-`Adjustment` (see `LookupType`):
+
+| Type | Default Targets | Default Effect |
+|---|---|---|
+| `owner_compensation_normalization` | SDE only | *(none — see below)* |
+| `owner_discretionary_expense` | EBITDA + SDE | increase |
+| `personal_vehicle` | EBITDA + SDE | increase |
+| `personal_travel` | EBITDA + SDE | increase |
+| `one_time_expense` | EBITDA + SDE | increase |
+| `non_recurring_professional_fees` | EBITDA + SDE | increase |
+| `related_party_rent_adjustment` | *(none — caller must specify)* | *(none — caller must specify)* |
+| `non_operating_income` | EBITDA + SDE | decrease |
+| `unusual_gain` | EBITDA + SDE | decrease |
+| `unusual_loss` | EBITDA + SDE | increase |
+| `custom` | *(none — caller must specify)* | *(none — caller must specify)* |
+
+`related_party_rent_adjustment` has no default effect because the direction
+genuinely depends on the fact pattern: replacing *below*-market rent with
+fair-market rent **decreases** earnings (the fair-market rent is higher),
+while replacing *above*-market rent with fair-market rent **increases**
+earnings (the fair-market rent is lower). `custom` likewise has no default —
+both require the caller to set `Effect`/`Targets` explicitly, and `Validate`
+reports `IssueAmbiguousEffect`/`IssueAmbiguousTargets` (errors) if they
+don't. `Type` is a plain string, like `financial.Code`, so new types can be
+added later without breaking existing callers.
+
+#### Owner compensation: no double counting
+
+`financial/metrics`' baseline `SDE` is `EBITDA + OwnerCompensation` — EBITDA
+already deducted owner compensation as an operating expense, and SDE adds
+it back in full because SDE is defined as the total benefit available to a
+single working owner. This means owner compensation is **already fully
+reflected** in the SDE baseline `Apply` starts from.
+
+An `owner_compensation_normalization` adjustment therefore represents a
+*replacement* of that baseline figure with a market-adjusted one, not a
+second independent add-back of the full compensation figure. The caller
+supplies `Amount` as the **difference** between actual and market-rate
+compensation (e.g. "the owner drew $180k; a hired GM would cost $90k; the
+adjustment amount is the $90k difference"), not the raw compensation
+figure — this package has no visibility into what a market-rate replacement
+would actually cost, so it cannot derive that difference itself. By
+default, `owner_compensation_normalization` targets `TargetSDE` only:
+EBITDA's baseline never added owner compensation back in the first place,
+so there is nothing to normalize in an EBITDA bridge, and an adjustment of
+this type is reported in `Result.Skipped` with `SkipNotTargeted` for the
+EBITDA bridge rather than silently ignored.
+`TestApply_DoubleCountPrevention_OwnerCompNotAddedTwice` in
+`apply_test.go` asserts this directly: applying the adjustment changes SDE
+by exactly its own `Amount`, never by the full `OwnerCompensation` value on
+top of that.
+
+#### The bridges
+
+`Apply` returns both bridges unconditionally — a `Bridge` is a transparent
+walk from a base metric to a normalized one:
+
+```
+Reported/Calculated EBITDA
++ confirmed positive adjustments targeting EBITDA
+- confirmed negative adjustments targeting EBITDA
+= Normalized EBITDA
+```
+
+```
+Base SDE (EBITDA + Owner Compensation, per financial/metrics)
++/- confirmed adjustments targeting SDE
+= Normalized SDE
+```
+
+Each `Bridge` carries `BaseAvailable`/`BaseValue` (from the underlying
+`metrics.Snapshot`), every `AppliedLine` (with its resolved
+`SignedAmount`), `TotalAdjustment`, and `NormalizedValue = BaseValue +
+TotalAdjustment`. `Result` additionally carries every adjustment that
+didn't contribute to a given bridge, in `Skipped`, with one of:
+
+| `SkipReason` | Meaning |
+|---|---|
+| `not_included` | `Adjustment.Included` was `false`. |
+| `wrong_period` | The adjustment's `Period` doesn't match the snapshot. |
+| `not_targeted` | The adjustment's resolved `Targets` doesn't include this bridge. |
+| `invalid` | The adjustment failed `Validate` (see `Result.Errors`). |
+| `base_metric_unavailable` | The bridge's starting metric (EBITDA or SDE) is itself unavailable for this period. |
+
+#### Validation
+
+`Validate(adjs, snapshot)` checks a set of adjustments for internal
+consistency, returning `Issue`s with `SeverityError` (block application —
+`Apply` skips the adjustment with `SkipInvalid`) or `SeverityWarning`
+(surfaced but non-blocking): missing ID, duplicate ID, missing/mismatched
+period, missing type, non-finite amount, ambiguous effect/targets (a type
+with no default that didn't set one explicitly), an unrecognized target,
+and a suspicious duplicate (same period + type + amount + effect appearing
+more than once — likely a double-entered adjustment, as opposed to two
+distinct legitimate adjustments that happen to share a type). A missing
+`Reason` is a warning, not an error — auditable but not blocking.
+`HasErrors(issues)` is a convenience check for "is this set safe to apply."
+
+See
+[`fixtures/adjustments_by_business_type.json`](fixtures/adjustments_by_business_type.json)
+for realistic confirmed adjustments across the four business archetypes
+(owner compensation normalization, personal vehicle, and a one-time repair
+for the HVAC business; owner salary normalization and a one-time
+rebranding cost for the agency; an unusual repair and a related-party rent
+adjustment for the manufacturer; non-recurring professional fees and
+non-operating income removal for the SaaS company), exercised end-to-end
+against the corresponding `normalized_*_multi_year.json` datasets in
+[`financial/adjustments/fixtures_test.go`](financial/adjustments/fixtures_test.go).
+
+### `financial/earnings`
+
+Selects or derives a single **maintainable earnings** figure from a
+caller-supplied, chronologically-ordered series of period/value
+`Observation`s (e.g. normalized EBITDA or normalized SDE values produced by
+`financial/adjustments` across several historical periods), for use as a
+future valuation formula's input (an SDE/EBITDA multiple, a DCF terminal
+value, etc.).
+
+This package has no idea where its observations came from and does not
+compute EBITDA/SDE itself — it only knows how to combine an ordered series
+of `(period, value)` pairs into one defensible number, under a
+caller-selected `Strategy`, with a fully explainable trail of what was
+included, excluded, and why.
+
+```go
+result := earnings.Calculate(observations, earnings.Options{
+    Strategy: earnings.StrategyWeightedAverage,
+    Weights:  map[string]float64{"2023": 20, "2024": 30, "2025": 50}, // percentages
+})
+fmt.Println(result.Value, result.Available)
+```
+
+#### Strategies
+
+| `Strategy` | Behavior |
+|---|---|
+| `latest_period` | Uses the single most recent comparable, available observation. Every other comparable observation is excluded with `ExclusionNotLatest`. |
+| `simple_average` | Unweighted arithmetic mean across every comparable, available observation. |
+| `weighted_average` | Caller-supplied explicit weights per period (`Options.Weights`, keyed by `Observation.Period`) — see below. |
+| `trend_adjusted` | Deterministic ordinary-least-squares linear regression (value against period index) across comparable observations; maintainable earnings is the fitted line's value at the final period. Requires **at least 3** comparable available observations — 2 points make any "trend" identical to a straight line between them, no more informative than `latest_period` or a 2-point average. |
+
+`trend_adjusted`'s documented limitation: it assumes the trend is
+well-approximated by a straight line across the full comparable window. It
+does not detect or special-case a level shift (e.g. a one-time
+acquisition), a regime change, or seasonality — those require subjective
+judgment this package deliberately leaves to the caller (e.g. by choosing
+which observations to include, or not using this strategy at all when a
+straight-line trend isn't a defensible model of the business). No more
+sophisticated method (exponential smoothing, seasonal decomposition,
+outlier-robust regression) is implemented, since those all require a
+subjective parameter or domain assumption this package's design brief asks
+to leave as documented future work rather than build prematurely.
+
+#### Weighted average validation
+
+`Options.Weights` must satisfy, in order — any failure makes the whole
+result `Unavailable` rather than silently coercing invalid weights into
+something that "works":
+
+1. Every comparable, available observation's period must have a weight
+   entry (`ExclusionNoWeight` otherwise — a forgotten weight is excluded,
+   never silently treated as `0`).
+2. Every supplied weight must be finite.
+3. Every supplied weight must be non-negative (unlike `adjustments.Amount`,
+   a negative weight is never mathematically usable for an average).
+4. The weights actually used must sum to **approximately 1.0** (fractional
+   form) **or approximately 100** (percentage form, e.g. the `20/30/50`
+   example above) — within a small tolerance for float/rounding noise. Any
+   other sum is rejected outright with an explanatory error, **not**
+   silently rescaled to sum to 1: this package never guesses that a caller
+   meant to normalize a wildly invalid set of weights (e.g. `{1, 2, 3}`)
+   into valid ones.
+
+#### Comparable periods
+
+`Calculate` never blindly averages observations of different
+`PeriodType` together (e.g. three full fiscal years and one trailing YTD
+stub). It first narrows to a comparable subset: if
+`Options.ComparablePeriodType` is set, only observations of that exact type
+are eligible; otherwise the comparable type is **inferred as whichever
+`PeriodType` the largest number of supplied observations share** — so the
+common shape of three full fiscal years plus one trailing YTD period
+correctly resolves to "fiscal year" as comparable, excluding the YTD stub,
+rather than the reverse (which a naive "use the last observation's type"
+rule would produce). Every excluded observation is reported in
+`Result.ExcludedPeriods` with `ExclusionIncomparablePeriodType`. A caller
+that genuinely wants to mix granularities (e.g. annualizing a YTD figure)
+must do that conversion itself before building the `Observation` slice.
+
+#### Explainability
+
+`Result` is designed for direct display in a future valuation report:
+`Strategy`, `IncludedPeriods`, `ExcludedPeriods` (each with a `Reason`),
+`RawValues`, `Weights` (for `weighted_average`), `Available`/`Value`, and
+`Warnings`/`Errors`.
+
+See
+[`financial/earnings/fixtures_test.go`](financial/earnings/fixtures_test.go)
+for all four business archetypes' EBITDA series run through
+`latest_period`, `simple_average`, `weighted_average`, and
+`trend_adjusted`, including a case that appends a synthetic YTD period to
+confirm it's excluded rather than blended into the fiscal-year average.
 
 ### `settings`
 
@@ -775,23 +1038,38 @@ go vet ./...
 ## Recommended next module
 
 With `financial`, `financial/classification`, `financial/reconciliation`,
-`financial/metrics`, and `settings` in place, the next natural addition is a
-**discretionary adjustments / add-backs** package that sits between
-`financial/metrics` and eventual valuation formulas: normalizing one-time,
-personal, or non-arm's-length items (above-market related-party rent,
-personal vehicle expenses run through the business, one-time legal
-settlements, non-recurring gains/losses) into explicit, individually
-auditable adjustments layered on top of `metrics.Snapshot`'s baseline
-`EBITDA`/`SDE` — rather than folding them silently into the metrics
-formulas themselves. `financial/metrics`'s `SDE` formula is deliberately
-just `EBITDA + OPEX_OWNER_COMP` today specifically so this next package has
-a clean, well-defined baseline to adjust from.
+`financial/metrics`, `financial/adjustments`, `financial/earnings`, and
+`settings` all in place, the next natural addition is a **valuation
+formulas** package (e.g. `valuation/`) that consumes a
+`financial.FinancialDataset`, an `adjustments.Result` (normalized
+EBITDA/SDE), an `earnings.Result` (maintainable earnings), and a resolved
+`settings.Resolution` to compute actual valuation outputs — SDE multiples,
+EBITDA multiples, DCF, capitalization of earnings, adjusted net asset
+value, per the methods already modeled in `settings.Method`. It should
+remain just as pure and infrastructure-free as the existing packages: data
+in, valuation results out, no persistence, no UI, no knowledge of where the
+inputs came from.
 
-After adjustments, a **valuation formulas** package (e.g. `valuation/`)
-that consumes a `financial.FinancialDataset`, adjusted metrics, and a
-resolved `settings.Resolution` to compute actual valuation outputs — SDE
-multiples, EBITDA multiples, DCF, capitalization of earnings, adjusted net
-asset value, per the methods already modeled in `settings.Method` — becomes
-the natural following step. It should remain just as pure and
-infrastructure-free as the existing packages: data in, valuation results
-out, no persistence, no UI, no knowledge of where the inputs came from.
+**Unresolved domain assumptions left for that module (or a later revision
+of `financial/adjustments`/`financial/earnings`) to address:**
+
+- `financial/adjustments` does not itself compute a market-rate
+  replacement-owner salary for `TypeOwnerCompensationNormalization` — the
+  caller supplies the already-computed *difference* as `Amount`. A future
+  module could add a market-compensation-lookup helper, but that would
+  introduce an external data dependency (salary survey data) this
+  repository's "no external services" constraint currently rules out.
+- `financial/earnings`'s `StrategyTrendAdjusted` is a plain OLS linear fit
+  with no outlier handling, level-shift detection, or seasonality —
+  deliberately left simple per this module's brief ("if domain assumptions
+  become subjective, do not implement it yet"). A future module needing
+  more sophistication (e.g. excluding a one-time COVID-affected year from
+  a trend fit) should treat that as a caller-side observation-selection
+  decision, not something this package infers automatically.
+- `financial/adjustments` does not cap or sanity-check adjustment magnitude
+  against the base metric (e.g. an adjustment larger than EBITDA itself
+  producing a sign-flipped "normalized EBITDA" is allowed through
+  uncaught). This mirrors `financial/metrics`' general stance of computing
+  exactly what the formula says and leaving business-judgment plausibility
+  review to a human or a future review-workflow layer, rather than this
+  package guessing at what counts as "too large."

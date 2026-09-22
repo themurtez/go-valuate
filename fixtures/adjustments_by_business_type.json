@@ -1,0 +1,136 @@
+{
+  "hvac": [
+    {
+      "id": "hvac-2025-owner-comp",
+      "period": "2025",
+      "type": "owner_compensation_normalization",
+      "amount": 32000,
+      "effect": "decrease",
+      "targets": [
+        "sde"
+      ],
+      "reason": "Owner drew $92,000; a market-rate service manager replacement would cost approximately $60,000. Normalize SDE baseline down by the $32,000 difference.",
+      "source_code": "OPEX_OWNER_COMP",
+      "notes": "Replacement-owner compensation study based on regional HVAC service manager salary survey.",
+      "included": true
+    },
+    {
+      "id": "hvac-2025-personal-vehicle",
+      "period": "2025",
+      "type": "personal_vehicle",
+      "amount": 7200,
+      "effect": "increase",
+      "targets": [
+        "ebitda",
+        "sde"
+      ],
+      "reason": "Owner's personal truck lease and fuel run through the business; not a cost of ongoing operations.",
+      "source_code": "OPEX_VEHICLE",
+      "included": true
+    },
+    {
+      "id": "hvac-2025-onetime-repair",
+      "period": "2025",
+      "type": "one_time_expense",
+      "amount": 5100,
+      "effect": "increase",
+      "targets": [
+        "ebitda",
+        "sde"
+      ],
+      "reason": "Emergency compressor replacement at the shop location; a non-recurring capital-adjacent repair, not a normal operating cost.",
+      "source_code": "OPEX_REPAIRS",
+      "included": true
+    }
+  ],
+  "agency": [
+    {
+      "id": "agency-2025-owner-salary",
+      "period": "2025",
+      "type": "owner_compensation_normalization",
+      "amount": 55000,
+      "effect": "decrease",
+      "targets": [
+        "sde"
+      ],
+      "reason": "Principal drew $180,000; a market-rate creative director replacement would cost approximately $125,000. Normalize SDE baseline down by the $55,000 difference.",
+      "source_code": "OPEX_OWNER_COMP",
+      "included": true
+    },
+    {
+      "id": "agency-2025-rebranding",
+      "period": "2025",
+      "type": "one_time_expense",
+      "amount": 18500,
+      "effect": "increase",
+      "targets": [
+        "ebitda",
+        "sde"
+      ],
+      "reason": "One-time agency rebranding project (new logo, website relaunch, signage) commissioned in 2025; not an ongoing marketing cost.",
+      "source_code": "OPEX_MARKETING",
+      "included": true
+    }
+  ],
+  "manufacturer": [
+    {
+      "id": "mfg-2025-unusual-repair",
+      "period": "2025",
+      "type": "one_time_expense",
+      "amount": 22000,
+      "effect": "increase",
+      "targets": [
+        "ebitda",
+        "sde"
+      ],
+      "reason": "Unplanned press-line motor failure required emergency replacement; a non-recurring repair well above the normal annual repairs run-rate.",
+      "source_code": "OPEX_REPAIRS",
+      "included": true
+    },
+    {
+      "id": "mfg-2025-related-party-rent",
+      "period": "2025",
+      "type": "related_party_rent_adjustment",
+      "amount": 14000,
+      "effect": "increase",
+      "targets": [
+        "ebitda",
+        "sde"
+      ],
+      "reason": "Facility is leased from an entity owned by the shareholders at above fair-market rent ($99,000 vs. an appraised fair-market rent of $85,000); normalize down to fair-market rent.",
+      "source_code": "OPEX_RENT",
+      "notes": "Fair-market rent supported by an independent commercial leasing appraisal dated 2025-06-01.",
+      "included": true
+    }
+  ],
+  "saas": [
+    {
+      "id": "saas-2025-unusual-fees",
+      "period": "2025",
+      "type": "non_recurring_professional_fees",
+      "amount": 24000,
+      "effect": "increase",
+      "targets": [
+        "ebitda",
+        "sde"
+      ],
+      "reason": "Legal and advisory fees related to a Series A financing round closed in 2025; not a recurring cost of operations.",
+      "source_code": "OPEX_PROFESSIONAL_FEES",
+      "included": true
+    },
+    {
+      "id": "saas-2025-non-operating-income",
+      "period": "2025",
+      "type": "non_operating_income",
+      "amount": 30000,
+      "effect": "decrease",
+      "targets": [
+        "ebitda",
+        "sde"
+      ],
+      "reason": "One-time gain from the sale of unused office equipment following a move to a smaller office; not core SaaS operating income.",
+      "source_code": "OTHER_INCOME",
+      "included": true
+    }
+  ]
+}
