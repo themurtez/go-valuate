@@ -268,6 +268,7 @@ go-valuate/
   analytics/debt/            debt service coverage, leverage, and caller-defined debt capacity (DSCR, amortization, scenarios)
   analytics/covenants/       caller-supplied covenant rules vs. already-calculated metrics: pass/fail/unavailable, headroom, warning buffer
   analytics/benchmarks/      caller-supplied company metrics vs. caller-supplied benchmark datasets: percentile/band placement, difference, favorable/unfavorable
+  analytics/valuedrivers/    deterministic driver/scenario sensitivity: re-runs orchestrator+consensus under caller-defined metric/assumption changes, one-factor-at-a-time and combined
   valuation/                 common valuation result envelope (value types, bridge, issues)
   valuation/sde/              SDE multiple method
   valuation/ebitda/           EBITDA multiple method
@@ -4704,6 +4705,106 @@ this guaranteed rather than incidental); see
 [`valuation/report/report_test.go`](valuation/report/report_test.go)'s
 round-trip and NaN/Inf-safety tests.
 
+### `analytics/valuedrivers`
+
+A deterministic **business value driver/scenario engine**: given a
+baseline `valuation/orchestrator.Request` (the same request shape a
+caller already builds to run SDE/EBITDA/capitalization/DCF/net-asset-value
+together), a `valuation/consensus.Options`/weights pair, and a set of
+caller-defined named **drivers** (revenue growth, margin change, SDE
+change, a method's multiple, a capitalization rate, DCF's discount/
+terminal-growth rate, a debt/cash bridge change, a working-capital
+change, an owner-compensation addback, a customer-loss impact, or an
+explicit method-multiple replacement), this package shows how each
+driver — alone (one-factor-at-a-time) or combined into a named scenario
+— changes the resulting method results and consensus, against a baseline
+it computes once from the same `Request`.
+
+**This package invents no new valuation formula.** Every recalculated
+figure in a `ScenarioResult` comes from re-running
+`valuation/orchestrator.Execute` and `valuation/consensus.Calculate`
+exactly as a caller invoking them directly would, against a deep-copied
+and driver-mutated `orchestrator.Request` — see `cloneRequest` in
+[`apply.go`](analytics/valuedrivers/apply.go). A `Driver` only ever
+changes the same strongly-typed `Input` fields
+(`sde.Input.MaintainableSDE`, `ebitda.Input.Multiple`,
+`dcf.Input.DiscountRate`, an `EquityBridgeInput`'s debt/cash fields, etc.)
+a caller could change by hand.
+
+**Explicit linkage only, never inferred causation.** Every `DriverType`
+constant's doc comment names exactly which method(s) and `Input` field(s)
+it can ever touch. A driver that names a method it has no documented
+linkage to, or whose baseline `Request` had no `Input` for that method at
+all, produces a `Linkage` of `LinkageNotApplicable` or
+`LinkageMethodExcluded` for it — not silence, and not an error — while
+still running to completion for every method it does apply to. This is
+the package brief's central guardrail: a "recurring revenue percentage"
+input can only change a method's multiple through
+`DriverMethodMultipleRule`, which requires the caller to supply the
+resulting multiple explicitly (`NewMultiple`) and only echoes
+`TriggerLabel`/`TriggerValue` as descriptive metadata — this package never
+derives a multiple from a percentage (or any other figure) itself.
+
+**One-factor-at-a-time vs. combined.** `Input.Drivers` is analyzed
+independently — each entry becomes its own single-driver `Scenario`
+against a fresh clone of the baseline `Request` — and reported in
+`Result.OneFactorAtATime`. `Input.Scenarios` is analyzed separately: each
+named `Scenario`'s full `Drivers` list is applied together, in order,
+against one fresh clone, so later drivers see earlier drivers' already-
+mutated fields (deltas compound, exactly as a caller manually building
+the same combined `Request` by hand would expect) — reported in
+`Result.Scenarios`. Both share one `ScenarioResult` shape.
+
+**Availability, not silence.** A structurally invalid `Driver` (empty
+`ID`, unrecognized `Type`, a nil params field for the selected `Type`, a
+missing required sub-field like `MarginChangeParams.RevenueBase` or
+`MethodMultipleRuleParams.Method`) is recorded as a blocking
+`DriverIssue` and contributes no mutation at all — never silently
+ignored. A driver that runs without error but ends up with
+`LinkageApplied` for zero methods (every targeted method was excluded or
+not applicable) is flagged `IssueNoLinkedMethod` as an advisory warning.
+A `Scenario` with an empty `ID` or no `Drivers` is `Available: false`.
+
+**Deltas.** Every `MethodDelta` and the scenario-level consensus delta
+are gated on both the baseline and scenario figure being `Available` —
+`DeltaAvailable`/`ConsensusDeltaAvailable` — so a method that flips
+availability in either direction under a scenario (e.g. a multiple driver
+pushing `Multiple` non-positive) never reports a misleading numeric
+delta.
+
+Files:
+
+- **`types.go`** — `DriverType` and its eleven params structs
+  (`RevenueGrowthParams`, `MarginChangeParams`, `SDEChangeParams`,
+  `MultipleChangeParams`, `CapRateChangeParams`,
+  `DiscountRateChangeParams`, `DebtChangeParams`,
+  `WorkingCapitalChangeParams`, `OwnerCompensationAdjustmentParams`,
+  `CustomerLossImpactParams`, `MethodMultipleRuleParams`), `Driver`,
+  `Scenario`, `Linkage`/`LinkageStatus`, `DriverIssueCode`/
+  `DriverIssueSeverity`/`DriverIssue`, `HasDriverErrors`, `MethodValue`,
+  `MethodDelta`, `ChangedInput`, `Assumption`, `ScenarioResult`,
+  `Baseline`, `Input`, `Result`, `FormulaVersion`.
+- **`apply.go`** — `cloneRequest` (the deep-copy every scenario mutates a
+  fresh instance of, including `Applicability`), `applyDriver`'s
+  per-`DriverType` dispatch, and one `apply<DriverType>` function per
+  driver stating its own per-method linkage precondition.
+- **`valuedrivers.go`** — `Calculate(Input) Result`: baseline
+  orchestrator/consensus run, the shared `runScenario` engine behind both
+  `OneFactorAtATime` and `Scenarios`, and every delta/assumption-rendering
+  helper.
+
+See [`analytics/valuedrivers/valuedrivers_test.go`](analytics/valuedrivers/valuedrivers_test.go),
+[`analytics/valuedrivers/determinism_test.go`](analytics/valuedrivers/determinism_test.go),
+and [`analytics/valuedrivers/roundtrip_test.go`](analytics/valuedrivers/roundtrip_test.go)
+for every scenario the task requires (revenue growth, margin change, SDE
+change, every rate/multiple driver, debt and working-capital changes,
+owner-compensation and customer-loss impacts, the caller-supplied
+method-multiple rule, a structurally invalid driver, a driver with no
+linkage to any method in a given baseline, a combined scenario that
+compounds differently from the naive sum of its one-factor-at-a-time
+parts, no-mutation-of-caller-input including `Applicability`, and full
+JSON round-trip/determinism coverage).
+
 ### `valuation/e2e`
 
 Not a reusable package — a single end-to-end deterministic fixture test
@@ -5033,6 +5134,7 @@ persist historical valuations").
 | Debt capacity/DSCR formulas | `debt.FormulaVersion`, echoed on `debt.Result.FormulaVersion` | The amortization/payment formula (including interest-only handling), the annual-debt-service aggregation, the DSCR/fixed-charge-coverage/leverage/interest-coverage formulas, the maximum-debt-under-DSCR and maximum-debt-under-leverage solvers, the combined-capacity (most-restrictive-constraint) rule, and the downside-scenario methodology (`analytics/debt`) |
 | Covenant evaluation formulas | `covenants.FormulaVersion`, echoed on `covenants.Result.FormulaVersion` | The operator-evaluation rule, the direction-aware headroom formula, the pass/fail/unavailable classification, and the warning-buffer (near-breach) classification (`analytics/covenants`) |
 | Benchmark comparison formulas | `benchmarks.FormulaVersion`, echoed on `benchmarks.Result.FormulaVersion` | The percentile-band/quartile linear-interpolation rule, the peer-observation rank-based percentile estimate, the non-decreasing-value precondition and its `IssueNonMonotonicBenchmarkPoints` guard, the band-placement rule, the difference/relative-difference formulas, and the favorable/unfavorable classification rule (`analytics/benchmarks`) |
+| Value driver/scenario formulas | `valuedrivers.FormulaVersion`, echoed on `valuedrivers.Result.FormulaVersion` | Every `DriverType`'s exact per-method mutation rule (which `Input` field(s) it changes and how), the `LinkageApplied`/`LinkageNotApplicable`/`LinkageMethodExcluded` classification, the one-factor-at-a-time vs. combined-scenario compounding order, and the value/percent-delta formulas (`analytics/valuedrivers`) |
 | AI request/response schema | `ai.RequestSchemaVersion`, echoed on `ai.Provenance.RequestSchemaVersion` | The `Request`/`Response` wire shape `financial/classification/ai` sends to/expects from a `Classifier` |
 | AI fallback orchestration | `ai.OrchestrationVersion`, echoed on `ai.Provenance.OrchestrationVersion` | The trigger/fallback/safety decision logic in `ClassifyWithFallback`/`ClassifyBatchWithFallback` (which `FallbackMode` runs AI when, structural-row skipping, disagreement handling) |
 | OpenAI adapter (classification) | `openai.AdapterVersion`, echoed on `ai.Provenance.AdapterVersion` | This specific provider adapter's prompt-construction/response-parsing logic (`financial/classification/ai/openai`) |
