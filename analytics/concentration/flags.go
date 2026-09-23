@@ -7,6 +7,21 @@ import "fmt"
 // qoe.buildFlags/cashflow.buildFlags/revenuequality.buildFlags's identical
 // "flags read already-computed Result fields" convention. Order is fixed:
 // FlagCode's declaration order, then by Period — never Go map order.
+//
+// Every flag function below gates its own threshold field at <= 0 before
+// comparing, mirroring analytics/debt.belowMinimumDSCRFlag's identical
+// defensive pattern. Thresholds is normally fully populated by
+// resolveThresholds (DefaultThresholds() whenever the zero value is
+// supplied) before buildFlags ever runs, so in the common case every field
+// here is already a real, positive threshold — but resolveThresholds only
+// substitutes defaults when the *entire* Thresholds struct is the zero
+// value; a caller who sets only one field (e.g. HighHHI) while leaving a
+// sibling field (e.g. HighLargestEntityShareRatio) at Go's natural zero
+// would otherwise get a threshold of exactly 0, which every comparison
+// below would satisfy for virtually any nonzero share — silently firing on
+// almost every period. The <= 0 gate makes that degenerate case inert
+// instead of spurious, the same protection debt.LenderPolicy's
+// zero-means-not-specified fields already have.
 func buildFlags(result Result, thresholds Thresholds) []Flag {
 	var flags []Flag
 
@@ -41,7 +56,7 @@ func latestPeriodConcentration(history []PeriodConcentration) PeriodConcentratio
 }
 
 func highLargestEntityFlag(latest PeriodConcentration, t Thresholds) (Flag, bool) {
-	if !latest.LargestEntityShare.Available || latest.LargestEntityShare.Value < t.HighLargestEntityShareRatio {
+	if t.HighLargestEntityShareRatio <= 0 || !latest.LargestEntityShare.Available || latest.LargestEntityShare.Value < t.HighLargestEntityShareRatio {
 		return Flag{}, false
 	}
 	return Flag{
@@ -62,7 +77,7 @@ func highTop5Flag(latest PeriodConcentration, t Thresholds) (Flag, bool) {
 		if s.N != 5 {
 			continue
 		}
-		if !s.Share.Available || s.Share.Value < t.HighTop5ShareRatio {
+		if t.HighTop5ShareRatio <= 0 || !s.Share.Available || s.Share.Value < t.HighTop5ShareRatio {
 			return Flag{}, false
 		}
 		return Flag{
@@ -78,7 +93,7 @@ func highTop5Flag(latest PeriodConcentration, t Thresholds) (Flag, bool) {
 }
 
 func highHHIFlag(latest PeriodConcentration, t Thresholds) (Flag, bool) {
-	if !latest.HHI.Available || latest.HHI.Value < t.HighHHI {
+	if t.HighHHI <= 0 || !latest.HHI.Available || latest.HHI.Value < t.HighHHI {
 		return Flag{}, false
 	}
 	return Flag{
@@ -96,7 +111,7 @@ func increasingConcentrationFlag(trend Trend, t Thresholds) (Flag, bool) {
 		return Flag{}, false
 	}
 	increase := trend.LastValue.Value - trend.FirstValue.Value
-	if increase < t.IncreasingLargestShareTrendPoints {
+	if t.IncreasingLargestShareTrendPoints <= 0 || increase < t.IncreasingLargestShareTrendPoints {
 		return Flag{}, false
 	}
 	return Flag{
@@ -124,7 +139,7 @@ func highScenarioImpactFlag(scenarios []Scenario, t Thresholds) (Flag, bool) {
 			candidate = s
 		}
 	}
-	if candidate == nil || candidate.RevenueImpactPercent.Value < t.HighScenarioRevenueImpactRatio {
+	if t.HighScenarioRevenueImpactRatio <= 0 || candidate == nil || candidate.RevenueImpactPercent.Value < t.HighScenarioRevenueImpactRatio {
 		return Flag{}, false
 	}
 	return Flag{

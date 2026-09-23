@@ -674,30 +674,30 @@ type Thresholds struct {
 	// decimal, e.g. 0.05 for 5 points) PeriodRevenue.RecurringPercent is
 	// allowed to fall from TotalRevenueHistory's first-vs-last available
 	// observation before FlagDecliningRecurringMix triggers.
-	DecliningRecurringMixPoints float64
+	DecliningRecurringMixPoints float64 `json:"declining_recurring_mix_points"`
 	// NewCustomerGrowthDependenceRatio is the NewCustomerRevenue-to-total-
 	// revenue-growth ratio at or above which FlagGrowthDependentOnNewCustomers
 	// triggers (i.e. new-customer revenue accounts for most or all of the
 	// period's total revenue growth, meaning the existing base is flat or
 	// shrinking beneath it).
-	NewCustomerGrowthDependenceRatio float64
+	NewCustomerGrowthDependenceRatio float64 `json:"new_customer_growth_dependence_ratio"`
 	// HighLostCustomerRevenueRatio is the LostCustomerRevenue-to-FromPeriod-
 	// total-customer-revenue ratio at or above which
 	// FlagHighLostCustomerRevenue triggers.
-	HighLostCustomerRevenueRatio float64
+	HighLostCustomerRevenueRatio float64 `json:"high_lost_customer_revenue_ratio"`
 	// VolatileRevenueRatio is RevenueVolatility.Value at or above which
 	// FlagVolatileRevenue triggers.
-	VolatileRevenueRatio float64
+	VolatileRevenueRatio float64 `json:"volatile_revenue_ratio"`
 	// OnePeriodSpikeRatio is the ratio by which a single period's
 	// TotalRevenue exceeds the average of every other available period
 	// before FlagOnePeriodSpike triggers (e.g. 0.5 means the spike period is
 	// at least 50% above the average of all other periods).
-	OnePeriodSpikeRatio float64
+	OnePeriodSpikeRatio float64 `json:"one_period_spike_ratio"`
 	// ShrinkingExistingBaseRatio is the |ExistingCustomerBaseChange|-to-
 	// FromPeriod-total-customer-revenue ratio at or above which
 	// FlagShrinkingExistingCustomerBase triggers, when
 	// ExistingCustomerBaseChange is negative.
-	ShrinkingExistingBaseRatio float64
+	ShrinkingExistingBaseRatio float64 `json:"shrinking_existing_base_ratio"`
 }
 
 // DefaultThresholds returns this package's baseline SMB-advisory trigger

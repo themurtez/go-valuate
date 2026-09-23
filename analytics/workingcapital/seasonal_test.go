@@ -115,3 +115,48 @@ func monthPeriodLabel(year, month int) string {
 	}
 	return "2025-1" + string(rune('0'+month-10))
 }
+
+// TestCalculateSeasonalProfile_BucketSumOrderMatchesHistoryOrder is a
+// regression test for a bug where calculateSeasonalProfile's internal
+// bucket-sum accumulation ranged over a map built from history (map
+// iteration order is randomized per Go's spec) rather than history itself,
+// so AverageNWCPercentOfRevenue could vary across otherwise-identical calls
+// whenever float64 addition is not associative for the specific values
+// involved. These three NWCPercentOfRevenue values are deliberately chosen
+// (verified directly in Go, not just reasoned about) so that summing them
+// in a different order produces a different float64 bit pattern —
+// (a+b)+c != (c+a)+b for these exact operands — making this test fail
+// against the pre-fix map-range implementation regardless of which
+// particular map iteration order Go's runtime happened to pick.
+func TestCalculateSeasonalProfile_BucketSumOrderMatchesHistoryOrder(t *testing.T) {
+	a := 0.15646189528649826
+	b := 0.15808004052684904
+	c := 0.1596957693719232
+	wantSum := (a + b) + c // the correct, history-order sum
+
+	meta := map[financial.Period]PeriodInfo{
+		"2023-Q1": {Type: PeriodTypeQuarter, FiscalYear: 2023, SequenceInYear: 1},
+		"2024-Q1": {Type: PeriodTypeQuarter, FiscalYear: 2024, SequenceInYear: 1},
+		"2025-Q1": {Type: PeriodTypeQuarter, FiscalYear: 2025, SequenceInYear: 1},
+	}
+	history := []PeriodNWC{
+		{Period: "2023-Q1", NWCPercentOfRevenue: AvailableValue(a)},
+		{Period: "2024-Q1", NWCPercentOfRevenue: AvailableValue(b)},
+		{Period: "2025-Q1", NWCPercentOfRevenue: AvailableValue(c)},
+	}
+
+	for i := 0; i < 20; i++ {
+		profile := calculateSeasonalProfile(history, meta)
+		if len(profile.Periods) != 1 {
+			t.Fatalf("run %d: expected 1 bucket, got %d", i, len(profile.Periods))
+		}
+		got := profile.Periods[0].AverageNWCPercentOfRevenue
+		if !got.Available {
+			t.Fatalf("run %d: expected Available average", i)
+		}
+		wantAvg := wantSum / 3
+		if got.Value != wantAvg {
+			t.Fatalf("run %d: AverageNWCPercentOfRevenue = %v, want exactly %v (bucket sum must follow history order, not map order)", i, got.Value, wantAvg)
+		}
+	}
+}

@@ -1,6 +1,9 @@
 package benchmarks
 
-import "fmt"
+import (
+	"fmt"
+	"math"
+)
 
 // evaluateMetric evaluates a single MetricRequest, returning its
 // Comparison plus any Issue found. ref identifies this request for
@@ -88,6 +91,20 @@ func evaluateMetric(r MetricRequest, ref string) (Comparison, []Issue) {
 	}
 
 	cmp.BenchmarkMedian = stats.median
+	if cmp.BenchmarkMedian.Available && (math.IsNaN(cmp.BenchmarkMedian.Amount) || math.IsInf(cmp.BenchmarkMedian.Amount, 0)) {
+		// A caller-supplied benchmark figure (Median/Quartiles.Median/a
+		// percentile-band value) was NaN or infinite — treated as
+		// unavailable rather than letting it propagate into Difference/
+		// RelativeDifference below, mirroring the identical guard just
+		// below for r.CompanyValue.
+		issues = append(issues, Issue{
+			Code:     IssueInvalidBenchmarkMedian,
+			Severity: SeverityWarning,
+			Message:  fmt.Sprintf("%s: benchmark median is NaN or infinite; treated as unavailable", metricRef),
+			MetricID: metricRef,
+		})
+		cmp.BenchmarkMedian = Unavailable()
+	}
 	if !stats.nonMonotonic {
 		cmp.BenchmarkRange = benchmarkRange(stats)
 	}
@@ -100,6 +117,16 @@ func evaluateMetric(r MetricRequest, ref string) (Comparison, []Issue) {
 		})
 		return cmp, issues
 	}
+	if math.IsNaN(r.CompanyValue.Amount) || math.IsInf(r.CompanyValue.Amount, 0) {
+		issues = append(issues, Issue{
+			Code:     IssueInvalidCompanyValue,
+			Severity: SeverityWarning,
+			Message:  fmt.Sprintf("%s: company value is NaN or infinite; benchmark-side fields are still reported but no comparison can be made", metricRef),
+			MetricID: metricRef,
+		})
+		cmp.CompanyValue = Unavailable()
+		return cmp, issues
+	}
 
 	if !stats.nonMonotonic {
 		cmp.Percentile = companyPercentile(r.Benchmark.Form, stats, r.CompanyValue.Amount)
@@ -108,16 +135,41 @@ func evaluateMetric(r MetricRequest, ref string) (Comparison, []Issue) {
 
 	if cmp.BenchmarkMedian.Available {
 		diff := r.CompanyValue.Amount - cmp.BenchmarkMedian.Amount
-		cmp.Difference = AvailableValue(diff)
-		if cmp.BenchmarkMedian.Amount != 0 {
-			cmp.RelativeDifference = AvailableValue(diff / absFloat(cmp.BenchmarkMedian.Amount))
+		diffOverflowed := math.IsInf(diff, 0)
+		if diffOverflowed {
+			issues = append(issues, Issue{
+				Code:     IssueRelativeDifferenceOverflow,
+				Severity: SeverityWarning,
+				Message:  fmt.Sprintf("%s: difference overflowed float64's range given the magnitude of company value versus benchmark median; difference and relative difference left unavailable", metricRef),
+				MetricID: metricRef,
+			})
 		} else {
+			cmp.Difference = AvailableValue(diff)
+		}
+
+		switch {
+		case diffOverflowed:
+			// Already reported above; relative difference cannot be
+			// computed from an overflowed difference either.
+		case cmp.BenchmarkMedian.Amount == 0:
 			issues = append(issues, Issue{
 				Code:     IssueBenchmarkMedianZero,
 				Severity: SeverityWarning,
 				Message:  fmt.Sprintf("%s: benchmark median is exactly 0; relative difference is undefined", metricRef),
 				MetricID: metricRef,
 			})
+		default:
+			relDiff := diff / absFloat(cmp.BenchmarkMedian.Amount)
+			if math.IsInf(relDiff, 0) {
+				issues = append(issues, Issue{
+					Code:     IssueRelativeDifferenceOverflow,
+					Severity: SeverityWarning,
+					Message:  fmt.Sprintf("%s: relative difference overflowed float64's range given the magnitude of company value versus benchmark median; left unavailable", metricRef),
+					MetricID: metricRef,
+				})
+			} else {
+				cmp.RelativeDifference = AvailableValue(relDiff)
+			}
 		}
 		cmp.Favorable = classifyFavorable(r.Direction, diff)
 	}

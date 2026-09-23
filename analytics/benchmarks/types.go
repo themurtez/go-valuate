@@ -342,6 +342,38 @@ const (
 	// RelativeDifference, Percentile, Band, and Favorable are all left
 	// unavailable. Advisory only.
 	IssueCompanyValueUnavailable IssueCode = "COMPANY_VALUE_UNAVAILABLE"
+	// IssueInvalidCompanyValue means a MetricRequest's CompanyValue was
+	// Available but CompanyValue.Amount was NaN or +/-Inf — a genuinely
+	// invalid figure, distinct from IssueCompanyValueUnavailable's "no
+	// figure was supplied" (see the package doc comment on
+	// available-but-invalid vs. unavailable). Treated the same as
+	// unavailable for every downstream comparison field (Difference,
+	// RelativeDifference, Percentile, Band, Favorable all left
+	// unavailable) rather than letting a non-finite value propagate into
+	// arithmetic, mirroring analytics/concentration.IssueInvalidObservation's
+	// identical NaN/Inf guard.
+	IssueInvalidCompanyValue IssueCode = "INVALID_COMPANY_VALUE"
+	// IssueInvalidBenchmarkMedian means the resolved benchmark median
+	// (from BenchmarkSet.Median, Quartiles.Median, or an interpolated
+	// percentile-band value — whichever Form supplied it) was NaN or
+	// +/-Inf. Treated the same as an unavailable median: BenchmarkRange,
+	// Percentile, Band, Difference, RelativeDifference, and Favorable are
+	// all computed as if no median were known, rather than letting a
+	// non-finite value propagate into Difference/RelativeDifference's
+	// arithmetic. Mirrors IssueInvalidCompanyValue's identical guard on
+	// the company side of the comparison.
+	IssueInvalidBenchmarkMedian IssueCode = "INVALID_BENCHMARK_MEDIAN"
+	// IssueRelativeDifferenceOverflow means CompanyValue and
+	// BenchmarkMedian were each individually finite, but Difference
+	// (CompanyValue - BenchmarkMedian) or RelativeDifference's division
+	// (Difference / |BenchmarkMedian|) overflowed float64's range — an
+	// extreme-magnitude edge case (e.g. a near-float64-max company value
+	// against a near-float64-min one, or against a
+	// near-float64-zero-but-nonzero median), distinct from
+	// IssueBenchmarkMedianZero's exactly-zero-denominator case. The
+	// affected field (Difference and/or RelativeDifference) is left
+	// unavailable rather than reporting +/-Inf.
+	IssueRelativeDifferenceOverflow IssueCode = "RELATIVE_DIFFERENCE_OVERFLOW"
 	// IssueInvalidForm means a BenchmarkSet's Form was empty or not one of
 	// the recognized BenchmarkForm constants. No benchmark-derived field
 	// can be computed.

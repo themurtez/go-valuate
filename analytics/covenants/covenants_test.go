@@ -1,6 +1,7 @@
 package covenants
 
 import (
+	"math"
 	"strings"
 	"testing"
 )
@@ -256,6 +257,53 @@ func TestCalculate_UnavailableMetric(t *testing.T) {
 	}
 }
 
+// TestCalculate_InvalidActualOrThreshold is a regression test for a bug
+// where an Available Actual with a NaN/Inf Amount, or a NaN/Inf
+// Threshold (which has no Available wrapper to check), flowed unguarded
+// into evaluateOperator/computeHeadroom's arithmetic, producing a NaN
+// Headroom. Caught by FuzzCalculate_ActualAndThreshold.
+func TestCalculate_InvalidActualOrThreshold(t *testing.T) {
+	t.Run("NaN actual", func(t *testing.T) {
+		res := Calculate(Input{Tests: []CovenantTest{
+			{CovenantID: "T1", Operator: OperatorGTE, Threshold: 1.25, Actual: AvailableValue(math.NaN()), Period: "2025"},
+		}})
+		tr := res.Tests[0]
+		if tr.Status != StatusUnavailable {
+			t.Errorf("Status = %q, want %q", tr.Status, StatusUnavailable)
+		}
+		if tr.Headroom.Available {
+			t.Errorf("Headroom = %+v, want unavailable for a NaN actual", tr.Headroom)
+		}
+		if !hasIssueCode(res.Warnings, IssueInvalidActualOrThreshold) {
+			t.Errorf("expected IssueInvalidActualOrThreshold in Warnings, got %+v", res.Warnings)
+		}
+	})
+	t.Run("infinite threshold", func(t *testing.T) {
+		res := Calculate(Input{Tests: []CovenantTest{
+			{CovenantID: "T1", Operator: OperatorGTE, Threshold: math.Inf(1), Actual: AvailableValue(1.5), Period: "2025"},
+		}})
+		tr := res.Tests[0]
+		if tr.Status != StatusUnavailable {
+			t.Errorf("Status = %q, want %q", tr.Status, StatusUnavailable)
+		}
+		if tr.Headroom.Available {
+			t.Errorf("Headroom = %+v, want unavailable for an infinite threshold", tr.Headroom)
+		}
+		if !hasIssueCode(res.Warnings, IssueInvalidActualOrThreshold) {
+			t.Errorf("expected IssueInvalidActualOrThreshold in Warnings, got %+v", res.Warnings)
+		}
+	})
+}
+
+func hasIssueCode(issues []Issue, code IssueCode) bool {
+	for _, w := range issues {
+		if w.Code == code {
+			return true
+		}
+	}
+	return false
+}
+
 // TestCalculate_WrongOperator covers a covenant test with an unrecognized
 // Operator value, verifying it is reported as StatusUnavailable with a
 // structured Issue rather than panicking, silently passing, or silently
@@ -498,6 +546,65 @@ func TestCalculate_OperatorEQ(t *testing.T) {
 		}})
 		if res.Tests[0].Status != StatusFail {
 			t.Errorf("Status = %q, want %q", res.Tests[0].Status, StatusFail)
+		}
+	})
+}
+
+// TestCalculate_WarningBufferHeadroomUnavailableDistinctFromNotApplicable
+// is a regression test for a bug where classifyWarningBuffer collapsed two
+// different causes into the single WarningBufferNotApplicable value: (1) a
+// test that already failed (no "how close to breach" question applies),
+// and (2) a passing OperatorEQ test, where Headroom is structurally
+// unavailable (computeHeadroom has no distance-to-threshold concept for
+// exact-match covenants) even though the "how close to breach" question
+// does apply. A caller scanning for the OperatorEQ buffer gap could not
+// tell it apart from an ordinary already-failed test. This test proves the
+// two now resolve to distinct WarningBufferStatus values under otherwise
+// identical WarningBufferPercent configuration.
+func TestCalculate_WarningBufferHeadroomUnavailableDistinctFromNotApplicable(t *testing.T) {
+	t.Run("passing OperatorEQ test reports HeadroomUnavailable, not NotApplicable", func(t *testing.T) {
+		res := Calculate(Input{Tests: []CovenantTest{
+			{
+				CovenantID:           "EXACT",
+				Operator:             OperatorEQ,
+				Threshold:            100,
+				Actual:               AvailableValue(100), // passes
+				WarningBufferPercent: 0.10,
+				Period:               "2025",
+			},
+		}})
+		tr := res.Tests[0]
+		if tr.Status != StatusPass {
+			t.Fatalf("Status = %q, want %q", tr.Status, StatusPass)
+		}
+		if tr.Headroom.Available {
+			t.Fatalf("Headroom = %+v, want unavailable for OperatorEQ", tr.Headroom)
+		}
+		if tr.WarningBufferStatus != WarningBufferHeadroomUnavailable {
+			t.Errorf("WarningBufferStatus = %q, want %q (a passing OperatorEQ test's buffer question is applicable but Headroom is structurally unavailable)", tr.WarningBufferStatus, WarningBufferHeadroomUnavailable)
+		}
+	})
+
+	t.Run("already-failed test still reports NotApplicable, not HeadroomUnavailable", func(t *testing.T) {
+		res := Calculate(Input{Tests: []CovenantTest{
+			{
+				CovenantID:           "MIN_DSCR",
+				Operator:             OperatorGTE,
+				Threshold:            1.25,
+				Actual:               AvailableValue(1.10), // fails; Headroom IS available here
+				WarningBufferPercent: 0.10,
+				Period:               "2025-Q3",
+			},
+		}})
+		tr := res.Tests[0]
+		if tr.Status != StatusFail {
+			t.Fatalf("Status = %q, want %q", tr.Status, StatusFail)
+		}
+		if !tr.Headroom.Available {
+			t.Fatalf("Headroom = %+v, want available for a failed OperatorGTE test", tr.Headroom)
+		}
+		if tr.WarningBufferStatus != WarningBufferNotApplicable {
+			t.Errorf("WarningBufferStatus = %q, want %q (already-failed, not a headroom-availability gap)", tr.WarningBufferStatus, WarningBufferNotApplicable)
 		}
 	})
 }

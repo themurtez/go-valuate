@@ -390,18 +390,14 @@ func resolvePolicy(p Policy) Policy {
 	if resolved.MaterialChangePercent == 0 {
 		resolved.MaterialChangePercent = DefaultPolicy.MaterialChangePercent
 	}
-	if resolved.SeverityWeights == nil {
-		resolved.SeverityWeights = DefaultPolicy.SeverityWeights
-	} else {
-		merged := make(map[Severity]float64, len(DefaultPolicy.SeverityWeights))
-		for k, v := range DefaultPolicy.SeverityWeights {
-			merged[k] = v
-		}
-		for k, v := range resolved.SeverityWeights {
-			merged[k] = v
-		}
-		resolved.SeverityWeights = merged
+	merged := make(map[Severity]float64, len(DefaultPolicy.SeverityWeights))
+	for k, v := range DefaultPolicy.SeverityWeights {
+		merged[k] = v
 	}
+	for k, v := range resolved.SeverityWeights {
+		merged[k] = v
+	}
+	resolved.SeverityWeights = merged
 	return resolved
 }
 

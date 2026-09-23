@@ -23,6 +23,53 @@ func TestBuild_Empty(t *testing.T) {
 	}
 }
 
+// TestBuild_NaNPurchasePriceTreatedAsUnavailable is a regression test for
+// a bug where an Available PurchasePrice/BuyerEquity/fee/adjustment
+// Value with a NaN or +/-Inf Amount flowed unguarded into
+// computeSourcesAndUses's arithmetic, producing a NaN/Inf
+// SourcesAndUses.TotalUses (and everything derived from it). Caught by
+// FuzzBuild_PurchasePriceAndEquity.
+func TestBuild_NaNPurchasePriceTreatedAsUnavailable(t *testing.T) {
+	res := Build(Input{
+		PurchasePrice: AvailableValue(math.NaN()),
+		BuyerEquity:   AvailableValue(500_000),
+	})
+	if res.SourcesAndUses.TotalUses.Available {
+		t.Fatalf("expected TotalUses unavailable for a NaN purchase price, got %+v", res.SourcesAndUses.TotalUses)
+	}
+	found := false
+	for _, w := range res.Warnings {
+		if w.Code == IssueInvalidValue {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected IssueInvalidValue in Warnings, got %+v", res.Warnings)
+	}
+}
+
+// TestBuild_InfiniteBuyerEquityTreatedAsUnavailable is the same
+// regression on a different field: an infinite BuyerEquity must not
+// leak into TotalSources.
+func TestBuild_InfiniteBuyerEquityTreatedAsUnavailable(t *testing.T) {
+	res := Build(Input{
+		PurchasePrice: AvailableValue(2_000_000),
+		BuyerEquity:   AvailableValue(math.Inf(1)),
+	})
+	if math.IsInf(res.SourcesAndUses.TotalSources.Amount, 0) {
+		t.Fatalf("expected TotalSources to not be infinite, got %+v", res.SourcesAndUses.TotalSources)
+	}
+	found := false
+	for _, w := range res.Warnings {
+		if w.Code == IssueInvalidValue {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected IssueInvalidValue in Warnings, got %+v", res.Warnings)
+	}
+}
+
 // TestBuild_SingleLoan covers the simplest financed deal: a purchase
 // price funded by buyer equity plus a single fully-amortizing bank term
 // loan, no seller note, no earnout, no fees.

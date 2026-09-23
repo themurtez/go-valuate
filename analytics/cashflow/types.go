@@ -239,27 +239,27 @@ type Thresholds struct {
 	// EBITDAToFreeCashFlow) ratio at or below which FlagWeakCashConversion
 	// triggers — conversion meaningfully below 1.0 (EBITDA not turning into
 	// cash).
-	WeakConversionRatio float64
+	WeakConversionRatio float64 `json:"weak_conversion_ratio"`
 	// HighCapexBurdenRatio is the Capex-to-EBITDA ratio at or above which
 	// FlagHighCapexBurden triggers.
-	HighCapexBurdenRatio float64
+	HighCapexBurdenRatio float64 `json:"high_capex_burden_ratio"`
 	// HighWorkingCapitalBurdenRatio is the |change in NWC|-to-EBITDA ratio
 	// at or above which FlagHighWorkingCapitalBurden triggers.
-	HighWorkingCapitalBurdenRatio float64
+	HighWorkingCapitalBurdenRatio float64 `json:"high_working_capital_burden_ratio"`
 	// LowDebtServiceCoverageRatio is the DSCR (operating cash flow /
 	// total debt service) at or below which FlagLowDebtServiceCoverage
 	// triggers. A DSCR of 1.0 means cash from operations exactly covers
 	// debt service with nothing left over, so this is typically set above
 	// 1.0 (e.g. 1.25, a common lender covenant floor).
-	LowDebtServiceCoverageRatio float64
+	LowDebtServiceCoverageRatio float64 `json:"low_debt_service_coverage_ratio"`
 	// UncoveredDistributionsRatio is the OwnerDistributions-to-free-cash-
 	// flow ratio at or above which FlagDistributionsExceedFreeCashFlow
 	// triggers (distributions consuming most or all of free cash flow,
 	// leaving little cushion).
-	UncoveredDistributionsRatio float64
+	UncoveredDistributionsRatio float64 `json:"uncovered_distributions_ratio"`
 	// LowRunwayMonths is the number of months of CashRunway at or below
 	// which FlagLowCashRunway triggers.
-	LowRunwayMonths float64
+	LowRunwayMonths float64 `json:"low_runway_months"`
 }
 
 // DefaultThresholds returns this package's baseline SMB-advisory trigger

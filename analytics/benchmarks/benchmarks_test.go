@@ -1,6 +1,9 @@
 package benchmarks
 
-import "testing"
+import (
+	"math"
+	"testing"
+)
 
 func approxEqual(t *testing.T, got, want, tol float64, label string) {
 	t.Helper()
@@ -605,6 +608,94 @@ func TestCalculate_BenchmarkMedianZero(t *testing.T) {
 	}
 	if !found {
 		t.Error("expected IssueBenchmarkMedianZero warning")
+	}
+}
+
+// TestCalculate_NaNCompanyValue is a regression test for a bug where an
+// Available CompanyValue with a NaN/Inf Amount (distinct from
+// !Available, which IssueCompanyValueUnavailable already guards) flowed
+// unguarded into Difference/RelativeDifference's arithmetic, producing a
+// NaN/Inf Comparison field. Caught by FuzzCalculate_CompanyValueAndMedian.
+func TestCalculate_NaNCompanyValue(t *testing.T) {
+	res := Calculate(Input{Metrics: []MetricRequest{
+		{
+			MetricID:     "M1",
+			CompanyValue: AvailableValue(math.NaN()),
+			Benchmark:    BenchmarkSet{Form: FormMedian, Median: AvailableValue(5), Source: BenchmarkSource{Name: "X"}},
+		},
+	}})
+	c := res.Comparisons[0]
+	if c.Difference.Available {
+		t.Errorf("expected Difference unavailable for a NaN company value, got %+v", c.Difference)
+	}
+	found := false
+	for _, w := range res.Warnings {
+		if w.Code == IssueInvalidCompanyValue {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected IssueInvalidCompanyValue warning")
+	}
+}
+
+// TestCalculate_InfBenchmarkMedian is a regression test for the same
+// class of bug as TestCalculate_NaNCompanyValue, on the benchmark side:
+// an Available Median with a NaN/Inf Amount flowed unguarded into
+// Difference/RelativeDifference. Caught by
+// FuzzCalculate_CompanyValueAndMedian.
+func TestCalculate_InfBenchmarkMedian(t *testing.T) {
+	res := Calculate(Input{Metrics: []MetricRequest{
+		{
+			MetricID:     "M1",
+			CompanyValue: AvailableValue(5),
+			Benchmark:    BenchmarkSet{Form: FormMedian, Median: AvailableValue(math.Inf(1)), Source: BenchmarkSource{Name: "X"}},
+		},
+	}})
+	c := res.Comparisons[0]
+	if c.BenchmarkMedian.Available {
+		t.Errorf("expected BenchmarkMedian unavailable for an infinite median, got %+v", c.BenchmarkMedian)
+	}
+	found := false
+	for _, w := range res.Warnings {
+		if w.Code == IssueInvalidBenchmarkMedian {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected IssueInvalidBenchmarkMedian warning")
+	}
+}
+
+// TestCalculate_RelativeDifferenceOverflow is a regression test for a
+// bug where CompanyValue and BenchmarkMedian were each individually
+// finite, but Difference's subtraction (or RelativeDifference's
+// division) overflowed float64's range, producing a +/-Inf Comparison
+// field — distinct from IssueBenchmarkMedianZero's exactly-zero-
+// denominator case. Caught by FuzzCalculate_CompanyValueAndMedian.
+func TestCalculate_RelativeDifferenceOverflow(t *testing.T) {
+	res := Calculate(Input{Metrics: []MetricRequest{
+		{
+			MetricID:     "M1",
+			CompanyValue: AvailableValue(math.MaxFloat64),
+			Benchmark:    BenchmarkSet{Form: FormMedian, Median: AvailableValue(-math.MaxFloat64), Source: BenchmarkSource{Name: "X"}},
+		},
+	}})
+	c := res.Comparisons[0]
+	if c.Difference.Available {
+		t.Errorf("expected Difference unavailable when the subtraction overflows, got %+v", c.Difference)
+	}
+	if c.RelativeDifference.Available {
+		t.Errorf("expected RelativeDifference unavailable when Difference overflowed, got %+v", c.RelativeDifference)
+	}
+	found := false
+	for _, w := range res.Warnings {
+		if w.Code == IssueRelativeDifferenceOverflow {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected IssueRelativeDifferenceOverflow warning")
 	}
 }
 

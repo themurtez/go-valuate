@@ -312,7 +312,7 @@ type Growth struct {
 // RatioTrendDirection is a coarse, deterministic characterization of one
 // ratio's overall direction across History, computed from its first vs.
 // last available observation — never inferred from a Message string.
-// Mirrors workingcapital.TrendDirection's identical three-way model.
+// Mirrors workingcapital.TrendDirection's identical four-way model.
 type RatioTrendDirection string
 
 const (

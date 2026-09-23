@@ -333,6 +333,14 @@ const (
 	// PeriodNumber < 1 or a negative Amount. That payment is excluded
 	// from EarnoutSchedule.
 	IssueInvalidEarnoutPayment IssueCode = "INVALID_EARNOUT_PAYMENT"
+	// IssueInvalidValue means one or more caller-supplied Value fields
+	// (PurchasePrice, BuyerEquity, a Fees field, WorkingCapital.Amount,
+	// or a ClosingAdjustments field) was Available but its Amount was
+	// NaN or +/-Inf — a genuinely invalid figure, distinct from
+	// Available == false. Each such field is treated as unavailable
+	// (never let through into SourcesAndUses/FinancingPercentages
+	// arithmetic) rather than reporting a NaN/Inf downstream figure.
+	IssueInvalidValue IssueCode = "INVALID_VALUE"
 )
 
 // Issue is a single Build-time input finding.

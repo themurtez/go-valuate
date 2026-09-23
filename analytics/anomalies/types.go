@@ -432,52 +432,52 @@ type Thresholds struct {
 	// AbsoluteAmountSpike is the unsigned dollar change (in the dataset's
 	// currency) at or above which RuleAbsoluteAmountSpike triggers. Defaults
 	// to 10000.
-	AbsoluteAmountSpike float64
+	AbsoluteAmountSpike float64 `json:"absolute_amount_spike"`
 	// PercentageChangeSpike is the |change| / |prior period value| ratio at
 	// or above which RulePercentageChangeSpike triggers. Expressed as a
 	// decimal (0.5 = 50%). Defaults to 0.5.
-	PercentageChangeSpike float64
+	PercentageChangeSpike float64 `json:"percentage_change_spike"`
 	// ExpenseOutpacingRevenueGap is the raw percentage-point gap between an
 	// expense account's growth rate and Total Revenue's growth rate, over
 	// the same adjacent period pair, at or above which
 	// RuleExpenseOutpacingRevenue triggers. Defaults to 0.20 (20 points).
-	ExpenseOutpacingRevenueGap float64
+	ExpenseOutpacingRevenueGap float64 `json:"expense_outpacing_revenue_gap"`
 	// MarginDeteriorationPoints is the raw percentage-point decline in gross
 	// or operating margin, period over prior period, at or above which
 	// RuleMarginDeterioration triggers. Defaults to 0.10 (10 points).
-	MarginDeteriorationPoints float64
+	MarginDeteriorationPoints float64 `json:"margin_deterioration_points"`
 	// NewCategoryMaterialAmount is the absolute-dollar floor a
 	// previously-absent expense account's current-period amount must meet
 	// or exceed for RuleNewMaterialExpenseCategory to trigger, combined via
 	// OR with NewCategoryMaterialPercentOfRevenue (mirroring
 	// review.IsMaterial's two-leg materiality test). Defaults to 5000.
-	NewCategoryMaterialAmount float64
+	NewCategoryMaterialAmount float64 `json:"new_category_material_amount"`
 	// NewCategoryMaterialPercentOfRevenue is a fraction of the current
 	// period's Total Revenue (e.g. 0.02 = 2%) that, combined via OR with
 	// NewCategoryMaterialAmount, is sufficient for
 	// RuleNewMaterialExpenseCategory to trigger. Evaluated only when that
 	// period's Total Revenue is available. Defaults to 0.02.
-	NewCategoryMaterialPercentOfRevenue float64
+	NewCategoryMaterialPercentOfRevenue float64 `json:"new_category_material_percent_of_revenue"`
 	// RepeatedValueMinOccurrences is the minimum number of distinct periods
 	// the exact same nonzero amount must appear in, for the same account,
 	// before RuleRepeatedUnusualValue triggers. Defaults to 3.
-	RepeatedValueMinOccurrences int
+	RepeatedValueMinOccurrences int `json:"repeated_value_min_occurrences"`
 	// SignFlipMinMagnitude is the minimum absolute value (in the dataset's
 	// currency) both the prior and current period's amount must have,
 	// before RuleSignFlip triggers on a sign change between them. Filters
 	// out sign noise on near-zero balances. Defaults to 100.
-	SignFlipMinMagnitude float64
+	SignFlipMinMagnitude float64 `json:"sign_flip_min_magnitude"`
 	// OwnerDiscretionaryShareOfRevenue is financial.CodeOpexOwnerComp plus
 	// every Input.DiscretionaryCodes amount, as a fraction of the most
 	// recent available period's Total Revenue, at or above which
 	// RuleHighOwnerDiscretionaryShare triggers. Expressed as a decimal (0.15
 	// = 15%). Defaults to 0.15.
-	OwnerDiscretionaryShareOfRevenue float64
+	OwnerDiscretionaryShareOfRevenue float64 `json:"owner_discretionary_share_of_revenue"`
 	// UnexpectedNegativeMinMagnitude is the minimum absolute value a
 	// negative revenue or expense amount must have before
 	// RuleUnexpectedNegativeAmount triggers. Filters out immaterial
 	// rounding noise around zero. Defaults to 1.
-	UnexpectedNegativeMinMagnitude float64
+	UnexpectedNegativeMinMagnitude float64 `json:"unexpected_negative_min_magnitude"`
 }
 
 // DefaultThresholds returns the conservative default Thresholds every field

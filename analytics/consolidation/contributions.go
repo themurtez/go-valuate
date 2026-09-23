@@ -3,6 +3,7 @@ package consolidation
 import (
 	"math"
 	"sort"
+	"strconv"
 
 	"github.com/themurtez/go-valuate/financial"
 )
@@ -45,6 +46,7 @@ func buildEntityContributions(selected []EntityDataset, periods []financial.Peri
 
 		var items []EntityCodeContribution
 		var missingRatePeriods map[financial.Period]struct{}
+		var overflowedCount int
 		ratesUsed := make(map[financial.Period]float64)
 
 		for _, item := range e.Dataset.Items {
@@ -68,6 +70,10 @@ func buildEntityContributions(selected []EntityDataset, periods []financial.Peri
 					continue
 				}
 				converted = raw * rate
+				if math.IsInf(converted, 0) {
+					overflowedCount++
+					continue
+				}
 				ratesUsed[item.Period] = rate
 			}
 
@@ -87,6 +93,14 @@ func buildEntityContributions(selected []EntityDataset, periods []financial.Peri
 				EntityID: e.EntityID,
 				Period:   p,
 				Message:  "no currency rate " + e.Dataset.Currency + "->" + targetCurrency + " for period \"" + string(p) + "\"; entity \"" + e.EntityID + "\"'s items for that period were excluded",
+			})
+		}
+		if overflowedCount > 0 {
+			issues = append(issues, Issue{
+				Code:     IssueCurrencyConversionOverflow,
+				Severity: SeverityWarning,
+				EntityID: e.EntityID,
+				Message:  "entity \"" + e.EntityID + "\": " + strconv.Itoa(overflowedCount) + " item(s) overflowed float64's range when converted to " + targetCurrency + " and were excluded",
 			})
 		}
 		for p, rate := range ratesUsed {

@@ -1,6 +1,9 @@
 package covenants
 
-import "fmt"
+import (
+	"fmt"
+	"math"
+)
 
 // evaluateTest evaluates a single CovenantTest, returning its TestResult
 // plus any Issue found. ref identifies this test for Issue.CovenantID
@@ -64,6 +67,19 @@ func evaluateTest(t CovenantTest, ref string) (TestResult, []Issue) {
 		return res, issues
 	}
 
+	if isInvalidFloat(t.Actual.Amount) || isInvalidFloat(t.Threshold) {
+		issues = append(issues, Issue{
+			Code:       IssueInvalidActualOrThreshold,
+			Severity:   SeverityWarning,
+			Message:    fmt.Sprintf("%s: actual or threshold is NaN or infinite; test reported as unavailable", covenantRef),
+			CovenantID: covenantRef,
+		})
+		res.Status = StatusUnavailable
+		res.WarningBufferStatus = WarningBufferNotApplicable
+		res.Explanation = "actual or threshold is NaN or infinite; this test cannot be evaluated"
+		return res, issues
+	}
+
 	passed := evaluateOperator(t.Operator, t.Actual.Amount, t.Threshold)
 	if passed {
 		res.Status = StatusPass
@@ -108,8 +124,11 @@ func classifyWarningBuffer(t CovenantTest, status Status, headroom Value) Warnin
 	if t.WarningBufferPercent == 0 && t.WarningBufferAmount == 0 {
 		return WarningBufferNotConfigured
 	}
-	if status != StatusPass || !headroom.Available {
+	if status != StatusPass {
 		return WarningBufferNotApplicable
+	}
+	if !headroom.Available {
+		return WarningBufferHeadroomUnavailable
 	}
 
 	within := false
@@ -238,4 +257,11 @@ func absFloat(v float64) float64 {
 		return -v
 	}
 	return v
+}
+
+// isInvalidFloat reports whether v is NaN or +/-Inf — used to reject a
+// genuinely invalid Actual.Amount or Threshold before either reaches
+// evaluateOperator/computeHeadroom's arithmetic.
+func isInvalidFloat(v float64) bool {
+	return math.IsNaN(v) || math.IsInf(v, 0)
 }

@@ -17,14 +17,9 @@ import (
 // should call this analysis separately per granularity by supplying only
 // one PeriodType's PeriodMeta at a time).
 func calculateSeasonalProfile(history []PeriodNWC, meta map[financial.Period]PeriodInfo) SeasonalProfile {
-	byPeriod := make(map[financial.Period]PeriodNWC, len(history))
-	for _, p := range history {
-		byPeriod[p.Period] = p
-	}
-
 	quarterCount, monthCount := 0, 0
-	for period := range byPeriod {
-		info, ok := meta[period]
+	for _, p := range history {
+		info, ok := meta[p.Period]
 		if !ok {
 			continue
 		}
@@ -51,8 +46,8 @@ func calculateSeasonalProfile(history []PeriodNWC, meta map[financial.Period]Per
 		count int
 	}
 	buckets := make(map[int]*bucket)
-	for period, pnwc := range byPeriod {
-		info, ok := meta[period]
+	for _, pnwc := range history {
+		info, ok := meta[pnwc.Period]
 		if !ok || info.Type != target || !pnwc.NWCPercentOfRevenue.Available {
 			continue
 		}

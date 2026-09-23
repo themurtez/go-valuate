@@ -97,3 +97,50 @@ func TestCalculate_ConcurrentCallsAreSafe(t *testing.T) {
 		}
 	}
 }
+
+// TestCalculate_ConcurrentZeroValuePolicyDoesNotCorruptDefaultPolicy runs
+// Calculate concurrently under a zero-value Input.Policy — the specific
+// path resolvePolicy's SeverityWeights nil-branch used to alias directly
+// onto the package-level DefaultPolicy.SeverityWeights map (see
+// TestResolvePolicy_ZeroValueSeverityWeightsNeverAliasesDefaultPolicy in
+// diagnostics_test.go for the sequential version of this regression).
+// Unlike TestCalculate_ConcurrentCallsAreSafe above (which always sets
+// Policy.SeverityWeights explicitly), this test exercises the exact
+// branch that was vulnerable: many goroutines simultaneously requesting
+// the default weights, each mutating its own returned copy, must never
+// observe or corrupt another goroutine's copy or the shared
+// DefaultPolicy — run under go test -race to catch any aliasing this
+// black-box output comparison alone might miss.
+func TestCalculate_ConcurrentZeroValuePolicyDoesNotCorruptDefaultPolicy(t *testing.T) {
+	in := Input{Portfolio: []BusinessSnapshot{stableBusiness("z1")}} // Policy left zero-value
+
+	const n = 20
+	done := make(chan Severity, n)
+	for i := 0; i < n; i++ {
+		go func() {
+			res := Calculate(in)
+			// Mutate this goroutine's own returned map — if it were
+			// aliased to DefaultPolicy.SeverityWeights (or to another
+			// goroutine's copy), this write would race or corrupt a
+			// value another goroutine reads below.
+			for k := range res.Policy.SeverityWeights {
+				res.Policy.SeverityWeights[k] = -1
+			}
+			done <- SeverityCritical
+		}()
+	}
+	for i := 0; i < n; i++ {
+		<-done
+	}
+
+	if got := DefaultPolicy.SeverityWeights[SeverityCritical]; got != 10 {
+		t.Fatalf("concurrent zero-value-Policy calls corrupted package-level DefaultPolicy: SeverityCritical weight = %v, want 10", got)
+	}
+
+	// A fresh call after the concurrent storm must still see the
+	// uncorrupted defaults.
+	after := Calculate(in)
+	if got := after.Policy.SeverityWeights[SeverityCritical]; got != 10 {
+		t.Fatalf("a call after the concurrent storm returned a corrupted SeverityCritical weight = %v, want 10", got)
+	}
+}

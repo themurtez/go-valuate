@@ -353,6 +353,37 @@ func TestCalculate_ExplicitZeroSeverityWeightIsHonored(t *testing.T) {
 	}
 }
 
+// TestResolvePolicy_ZeroValueSeverityWeightsNeverAliasesDefaultPolicy is a
+// regression test for a bug where resolvePolicy's nil-SeverityWeights
+// branch assigned DefaultPolicy.SeverityWeights directly into the resolved
+// Policy (a map-header copy, not a value copy), so a caller mutating
+// Result.Policy.SeverityWeights on a zero-value-Policy call — including one
+// racing concurrently with another such call — would corrupt the shared
+// package-level DefaultPolicy for every other caller, past and future.
+// Every returned SeverityWeights map must be independently allocated.
+func TestResolvePolicy_ZeroValueSeverityWeightsNeverAliasesDefaultPolicy(t *testing.T) {
+	b := stableBusiness("a1")
+
+	first := Calculate(Input{Portfolio: []BusinessSnapshot{b}})
+	if len(first.Policy.SeverityWeights) == 0 {
+		t.Fatalf("expected Policy.SeverityWeights to resolve to DefaultPolicy's weights, got empty map")
+	}
+
+	// Mutate the returned map as an adversarial caller might.
+	for k := range first.Policy.SeverityWeights {
+		first.Policy.SeverityWeights[k] = -999
+	}
+
+	if got := DefaultPolicy.SeverityWeights[SeverityCritical]; got != 10 {
+		t.Fatalf("mutating a resolved Result.Policy.SeverityWeights corrupted package-level DefaultPolicy: SeverityCritical weight = %v, want 10", got)
+	}
+
+	second := Calculate(Input{Portfolio: []BusinessSnapshot{b}})
+	if got := second.Policy.SeverityWeights[SeverityCritical]; got != 10 {
+		t.Fatalf("a second zero-value-Policy call returned a corrupted SeverityCritical weight = %v, want 10 (DefaultPolicy must not have been aliased/mutated by the first call)", got)
+	}
+}
+
 // TestCalculate_DoesNotMutateInput proves Calculate never mutates
 // caller-owned Input, including nested Prior pointers.
 func TestCalculate_DoesNotMutateInput(t *testing.T) {

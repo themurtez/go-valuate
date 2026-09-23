@@ -306,6 +306,16 @@ const (
 	// non-finite or <= 0; that entry is ignored exactly as if it were
 	// absent (see IssueMissingCurrencyRate).
 	IssueInvalidCurrencyRate IssueCode = "INVALID_CURRENCY_RATE"
+	// IssueCurrencyConversionOverflow means a matched CurrencyRates entry
+	// was individually valid (finite, > 0 — see IssueInvalidCurrencyRate)
+	// but converting a specific line item (raw amount x rate) overflowed
+	// float64's range — an extreme-magnitude edge case (e.g. an
+	// unrealistically large rate applied to an already-large amount),
+	// distinct from the rate itself being invalid. That item is excluded
+	// from Result.Consolidated for the affected (entity, code, period)
+	// exactly as IssueMissingCurrencyRate excludes an unconvertible item,
+	// rather than reporting a +/-Inf ConvertedAmount/WeightedAmount.
+	IssueCurrencyConversionOverflow IssueCode = "CURRENCY_CONVERSION_OVERFLOW"
 	// IssueUnknownEliminationEntity means an Input.Eliminations entry named
 	// an EntityID absent from Input.Entities. That entry is skipped.
 	IssueUnknownEliminationEntity IssueCode = "UNKNOWN_ELIMINATION_ENTITY"

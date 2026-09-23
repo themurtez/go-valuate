@@ -549,6 +549,45 @@ func TestDefaultPolicy(t *testing.T) {
 	}
 }
 
+// TestBuildFlags_PartialThresholdsDoesNotSpuriouslyFireOnZeroField is a
+// regression test for a bug where a caller setting only one Thresholds
+// field (leaving every sibling field at Go's natural zero, since
+// resolveThresholds only substitutes DefaultThresholds() for a *wholly*
+// zero-value Thresholds struct) would silently get a Threshold of exactly
+// 0 for every unset field — and every flag function compared
+// Value < Threshold with no guard, so a 0 threshold matched virtually any
+// nonzero share, firing FlagHighLargestEntityConcentration,
+// FlagHighTop5Concentration, FlagIncreasingConcentration, and
+// FlagHighScenarioImpact on almost every period regardless of actual
+// concentration. Only FlagHighHHI (the one field this test intentionally
+// sets) should fire; every other flag's threshold field is left at its
+// natural zero and must stay inert.
+func TestBuildFlags_PartialThresholdsDoesNotSpuriouslyFireOnZeroField(t *testing.T) {
+	res := Calculate(Input{
+		Basis:        BasisCustomerRevenue,
+		Observations: highlyConcentratedObservations(),
+		PeriodMeta:   threeYearMeta(),
+	}, Options{
+		// Deliberately set only HighHHI; every sibling field is left at
+		// Go's natural zero float64, exactly the partial-struct scenario
+		// resolveThresholds does not defend against.
+		Thresholds: Thresholds{HighHHI: 2500},
+	})
+
+	if !res.Available {
+		t.Fatalf("expected Available == true, errors: %+v", res.Errors)
+	}
+
+	for _, f := range res.Flags {
+		switch f.Code {
+		case FlagHighHHI:
+			// Expected to fire — this is the one threshold the test set.
+		case FlagHighLargestEntityConcentration, FlagHighTop5Concentration, FlagIncreasingConcentration, FlagHighScenarioImpact:
+			t.Errorf("flag %s fired spuriously against an unset (natural-zero) threshold field: %+v", f.Code, f)
+		}
+	}
+}
+
 func TestHasErrors(t *testing.T) {
 	if HasErrors(nil) {
 		t.Fatalf("expected no errors for nil issues")

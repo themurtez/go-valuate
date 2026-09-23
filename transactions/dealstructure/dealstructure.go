@@ -1,6 +1,9 @@
 package dealstructure
 
-import "fmt"
+import (
+	"fmt"
+	"math"
+)
 
 // Build derives a full Result from in. It never mutates any caller-owned
 // input and performs no I/O.
@@ -8,6 +11,9 @@ func Build(in Input) Result {
 	result := Result{FormulaVersion: FormulaVersion}
 
 	var issues []Issue
+
+	in, invalidIssues := sanitizeInput(in)
+	issues = append(issues, invalidIssues...)
 
 	debtSchedules, debtIssues := buildDebtSchedules(in.DebtTranches)
 	issues = append(issues, debtIssues...)
@@ -89,6 +95,49 @@ func Build(in Input) Result {
 	}
 
 	return result
+}
+
+// sanitizeInput returns a copy of in with every caller-supplied Value
+// field's NaN/Inf Amount replaced by Unavailable() — never mutating in
+// itself, matching this package's documented no-mutation contract. This
+// is a single, comprehensive guard applied once at Build's entry rather
+// than scattered NaN/Inf checks at each of the several downstream sites
+// that read a Value.Amount (computeSourcesAndUses,
+// computeFinancingPercentages, etc.), so a NaN/Inf PurchasePrice/
+// BuyerEquity/fee/adjustment figure can never propagate into
+// SourcesAndUses/FinancingPercentages arithmetic — a regression caught by
+// FuzzBuild_PurchasePriceAndEquity. DebtTranche.Amount/AnnualInterestRate
+// are bare float64 (not Value-wrapped) and are already separately
+// guarded by validateTrancheTerms.
+func sanitizeInput(in Input) (Input, []Issue) {
+	var issues []Issue
+	rejected := 0
+	sanitize := func(v Value) Value {
+		if v.Available && (math.IsNaN(v.Amount) || math.IsInf(v.Amount, 0)) {
+			rejected++
+			return Unavailable()
+		}
+		return v
+	}
+
+	in.PurchasePrice = sanitize(in.PurchasePrice)
+	in.BuyerEquity = sanitize(in.BuyerEquity)
+	in.Fees.LegalAndAdvisory = sanitize(in.Fees.LegalAndAdvisory)
+	in.Fees.DueDiligence = sanitize(in.Fees.DueDiligence)
+	in.Fees.FinancingFees = sanitize(in.Fees.FinancingFees)
+	in.Fees.Other = sanitize(in.Fees.Other)
+	in.WorkingCapital.Amount = sanitize(in.WorkingCapital.Amount)
+	in.ClosingAdjustments.CashAcquired = sanitize(in.ClosingAdjustments.CashAcquired)
+	in.ClosingAdjustments.AssumedDebt = sanitize(in.ClosingAdjustments.AssumedDebt)
+
+	if rejected > 0 {
+		issues = append(issues, Issue{
+			Code:     IssueInvalidValue,
+			Severity: SeverityWarning,
+			Message:  fmt.Sprintf("%d supplied figure(s) were NaN or infinite and were treated as unavailable", rejected),
+		})
+	}
+	return in, issues
 }
 
 // buildDebtSchedules validates and amortizes every entry in tranches,

@@ -280,6 +280,16 @@ const (
 	// (this is expected whenever an upstream figure could not be
 	// computed for a period).
 	IssueActualUnavailable IssueCode = "ACTUAL_UNAVAILABLE"
+	// IssueInvalidActualOrThreshold means Actual was Available but
+	// Actual.Amount was NaN or +/-Inf, or Threshold itself was NaN or
+	// +/-Inf — a genuinely invalid figure, distinct from
+	// IssueActualUnavailable's "no figure was supplied" (Threshold has no
+	// Available wrapper, so this is the only signal a caller gets that a
+	// non-finite Threshold was rejected). That test's TestResult is
+	// StatusUnavailable rather than letting a non-finite value propagate
+	// into Headroom/WarningBufferStatus arithmetic, mirroring
+	// analytics/benchmarks.IssueInvalidCompanyValue's identical guard.
+	IssueInvalidActualOrThreshold IssueCode = "INVALID_ACTUAL_OR_THRESHOLD"
 	// IssueDuplicateCovenantID means two or more tests share the same
 	// non-empty CovenantID and Period. Every such test is still evaluated
 	// independently and included in Result.Tests; this is advisory only
@@ -351,12 +361,20 @@ const (
 	// WarningBufferOutsideBuffer means Status == StatusPass and Headroom
 	// cleared every configured buffer threshold — safely clear.
 	WarningBufferOutsideBuffer WarningBufferStatus = "outside_buffer"
-	// WarningBufferNotApplicable means a buffer was configured but
-	// Status is not StatusPass (a buffer only classifies how close a
-	// passing test is to breaching; a test that has already failed or is
-	// unavailable has no "how close to breach" question left to answer)
-	// or Headroom itself is unavailable.
+	// WarningBufferNotApplicable means a buffer was configured but Status
+	// is not StatusPass — a buffer only classifies how close a passing
+	// test is to breaching, and a test that has already failed or is
+	// unavailable has no "how close to breach" question left to answer.
 	WarningBufferNotApplicable WarningBufferStatus = "not_applicable"
+	// WarningBufferHeadroomUnavailable means Status == StatusPass (so a
+	// "how close to breach" question genuinely applies) but Headroom
+	// itself could not be computed — in practice this means
+	// CovenantTest.Operator is OperatorEQ, the one Operator computeHeadroom
+	// has no distance-to-threshold concept for (see computeHeadroom's doc
+	// comment). Kept distinct from WarningBufferNotApplicable so a caller
+	// scanning for OperatorEQ-covenant buffer gaps does not have to also
+	// filter out every already-failed test to find them.
+	WarningBufferHeadroomUnavailable WarningBufferStatus = "headroom_unavailable"
 )
 
 // TestResult is one CovenantTest's full evaluation.

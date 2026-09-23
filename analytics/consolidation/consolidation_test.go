@@ -1,6 +1,7 @@
 package consolidation
 
 import (
+	"math"
 	"testing"
 
 	"github.com/themurtez/go-valuate/financial"
@@ -258,6 +259,47 @@ func TestCalculate_DifferentCurrencies_WithRate(t *testing.T) {
 		if c.EntityID != "sub" || c.FromCurrency != "EUR" || c.ToCurrency != "USD" {
 			t.Errorf("unexpected conversion entry: %+v", c)
 		}
+	}
+}
+
+// TestCalculate_CurrencyConversionOverflow is a regression test for a bug
+// where a CurrencyRates entry's Rate was individually valid (finite,
+// > 0 — passing the existing IssueInvalidCurrencyRate guard in
+// buildRateIndex) but multiplying it against a specific line item's raw
+// amount overflowed float64's range, producing a +/-Inf
+// ConvertedAmount/WeightedAmount that then leaked into
+// Result.Consolidated. Caught by FuzzCalculate_CurrencyRate.
+func TestCalculate_CurrencyConversionOverflow(t *testing.T) {
+	in := Input{
+		Entities: []EntityDataset{
+			{EntityID: "parent", Dataset: parentUSD()},
+			{EntityID: "sub", Dataset: subsidiaryEUR()},
+		},
+		Periods: twoYearPeriods(),
+		CurrencyRates: []CurrencyRate{
+			{FromCurrency: "EUR", ToCurrency: "USD", Period: "2024", Rate: math.MaxFloat64},
+			{FromCurrency: "EUR", ToCurrency: "USD", Period: "2025", Rate: math.MaxFloat64},
+		},
+		Policy: Policy{TargetCurrency: "USD"},
+	}
+	result := Calculate(in)
+
+	if !result.Available {
+		t.Fatalf("expected Available true, errors=%v", result.Errors)
+	}
+	for _, it := range result.Consolidated.Items {
+		if math.IsInf(it.Amount, 0) {
+			t.Fatalf("Consolidated.Items[%s/%s] leaked +Inf from an overflowed currency conversion: %v", it.Code, it.Period, it.Amount)
+		}
+	}
+	found := false
+	for _, w := range result.Warnings {
+		if w.Code == IssueCurrencyConversionOverflow {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected IssueCurrencyConversionOverflow in Warnings, got %+v", result.Warnings)
 	}
 }
 

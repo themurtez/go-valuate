@@ -537,29 +537,29 @@ type Scenario struct {
 type Thresholds struct {
 	// HighLargestEntityShareRatio is LargestEntityShare at or above which
 	// FlagHighLargestEntityConcentration triggers.
-	HighLargestEntityShareRatio float64
+	HighLargestEntityShareRatio float64 `json:"high_largest_entity_share_ratio"`
 	// HighTop5ShareRatio is the top-5 TopNShare.Share at or above which
 	// FlagHighTop5Concentration triggers. If Policy.TopN does not include 5,
 	// this flag never triggers (no synthetic top-5 figure is computed solely
 	// for flag evaluation).
-	HighTop5ShareRatio float64
+	HighTop5ShareRatio float64 `json:"high_top5_share_ratio"`
 	// HighHHI is the HHI value (0-10,000 scale) at or above which
 	// FlagHighHHI triggers. 2500 is the U.S. DOJ/FTC "highly concentrated"
 	// merger-guidelines threshold, used as this package's own default (see
 	// DefaultThresholds) purely as a familiar reference point, not because
 	// this package endorses antitrust guidelines as a concentration-risk
 	// standard.
-	HighHHI float64
+	HighHHI float64 `json:"high_hhi"`
 	// IncreasingLargestShareTrendPoints is the number of percentage points
 	// (raw decimal, e.g. 0.1 for 10 points) LargestShareTrend is allowed to
 	// rise from its first to its last available observation before
 	// FlagIncreasingConcentration triggers.
-	IncreasingLargestShareTrendPoints float64
+	IncreasingLargestShareTrendPoints float64 `json:"increasing_largest_share_trend_points"`
 	// HighScenarioRevenueImpactRatio is a Scenario's RevenueImpactPercent at
 	// or above which FlagHighScenarioImpact triggers, evaluated against the
 	// smallest N present in Policy.ScenarioTopN (the least-severe top-N-loss
 	// scenario configured) plus ScenarioLostLargestEntity.
-	HighScenarioRevenueImpactRatio float64
+	HighScenarioRevenueImpactRatio float64 `json:"high_scenario_revenue_impact_ratio"`
 }
 
 // DefaultThresholds returns this package's baseline SMB-advisory trigger

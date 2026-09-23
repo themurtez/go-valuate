@@ -12,26 +12,26 @@ type Thresholds struct {
 	// checked independently against Ratios.AdjustmentToEBITDA and
 	// Ratios.AdjustmentToSDE (either crossing it is enough). Expressed as a
 	// decimal (0.30 = 30%). Defaults to 0.30.
-	LargeNormalizationBurdenRatio float64
+	LargeNormalizationBurdenRatio float64 `json:"large_normalization_burden_ratio"`
 	// VolatileEarningsRatio is the volatility statistic (sample standard
 	// deviation of year-over-year growth — see
 	// metrics.VolatilityResult/calculateVolatility) at or above which
 	// FlagVolatileEarnings triggers, checked independently against
 	// EBITDAVolatility and SDEVolatility. Expressed as a decimal (0.35 =
 	// 35% swing). Defaults to 0.35.
-	VolatileEarningsRatio float64
+	VolatileEarningsRatio float64 `json:"volatile_earnings_ratio"`
 	// InconsistentMarginSwing is the absolute range (max - min, in raw
 	// margin decimal terms, e.g. 0.15 = 15 percentage points) across
 	// EBITDAMarginTrend's fiscal-year margin values at or above which
 	// FlagInconsistentMargins triggers. Defaults to 0.15.
-	InconsistentMarginSwing float64
+	InconsistentMarginSwing float64 `json:"inconsistent_margin_swing"`
 	// OwnerDiscretionaryShareOfSDE is the owner-related SDE-bridge
 	// adjustment total (see ownerDiscretionaryTypes and
 	// largeOwnerDiscretionaryComponentFlag in flags.go) as a fraction of
 	// normalized SDE, for the most recent period, at or above which
 	// FlagLargeOwnerDiscretionaryComponent triggers. Expressed as a
 	// decimal (0.25 = 25%). Defaults to 0.25.
-	OwnerDiscretionaryShareOfSDE float64
+	OwnerDiscretionaryShareOfSDE float64 `json:"owner_discretionary_share_of_sde"`
 	// RepeatedOneTimeMinPeriods is the minimum number of distinct periods
 	// (RecurrencePattern.Count) a nominally non-recurring adjustments.Type
 	// must appear in, with at least one applied/confirmed line, before
@@ -40,13 +40,13 @@ type Thresholds struct {
 	// type recurring in 2 or more separate periods is the deterministic
 	// signal this package uses for "may not be truly non-recurring," per
 	// the task's explicit requirement.
-	RepeatedOneTimeMinPeriods int
+	RepeatedOneTimeMinPeriods int `json:"repeated_one_time_min_periods"`
 	// NonOperatingIncomeShareOfEBITDA is the non-operating-income-removal
 	// adjustment total (TypeNonOperatingIncome + TypeUnusualGain) as a
 	// fraction of reported EBITDA, for the most recent period, at or above
 	// which FlagNonOperatingIncomeSupportingEarnings triggers. Expressed
 	// as a decimal (0.20 = 20%). Defaults to 0.20.
-	NonOperatingIncomeShareOfEBITDA float64
+	NonOperatingIncomeShareOfEBITDA float64 `json:"non_operating_income_share_of_ebitda"`
 	// NearZeroMaintainableEarnings is an absolute dollar floor (in the
 	// dataset's currency): MaintainableEBITDA.Value/MaintainableSDE.Value
 	// at or below this value triggers
@@ -58,7 +58,7 @@ type Thresholds struct {
 	// either crossing triggers the flag, mirroring
 	// review.Policy.MaterialAmountThreshold/MaterialPercentOfRevenue's
 	// identical two-leg materiality test (see review.IsMaterial).
-	NearZeroMaintainableEarnings float64
+	NearZeroMaintainableEarnings float64 `json:"near_zero_maintainable_earnings"`
 	// NearZeroMaintainableEarningsPercentOfRevenue is a fraction of the
 	// most recent period's reported total revenue (e.g. 0.02 = 2%) at or
 	// below which maintainable earnings is considered "near zero,"
@@ -69,7 +69,7 @@ type Thresholds struct {
 	// this package's History already carries on every Snapshot without
 	// requiring a caller to supply a separate figure. Defaults to 0.02
 	// (2% of revenue).
-	NearZeroMaintainableEarningsPercentOfRevenue float64
+	NearZeroMaintainableEarningsPercentOfRevenue float64 `json:"near_zero_maintainable_earnings_percent_of_revenue"`
 }
 
 // DefaultThresholds returns the conservative default Thresholds every field
