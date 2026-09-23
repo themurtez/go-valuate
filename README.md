@@ -264,6 +264,7 @@ go-valuate/
   analytics/concentration/   customer/vendor concentration risk: shares, HHI, dependency changes, loss scenarios
   analytics/anomalies/       expense anomaly / margin-leakage detection: deterministic spike/variance/pattern rules
   analytics/variance/        budget/forecast/prior-period vs. actual variance: line/category/bridge analysis
+  analytics/forecast/        deterministic financial projections and scenario sets from caller-supplied assumptions
   valuation/                 common valuation result envelope (value types, bridge, issues)
   valuation/sde/              SDE multiple method
   valuation/ebitda/           EBITDA multiple method
@@ -3233,6 +3234,253 @@ category rollup, top favorable/unfavorable, materiality by amount and by
 percent, the bridge reconciliation identity, and JSON/determinism)
 exercised against hand-built fixtures.
 
+### `analytics/forecast`
+
+A deterministic **financial projection and scenario engine**: given a
+historical base period and a caller-supplied set of period-by-period
+assumptions (revenue growth, gross margin/COGS, opex, D&A, capex, working
+capital, tax, debt service), it compounds those assumptions forward across
+a forecast horizon and reports the resulting projected P&L, EBITDA, SDE,
+margins, working capital, cash flow, and debt-service coverage — for as
+many independently-named scenarios (base/downside/upside/custom) as the
+caller wants to run side by side.
+
+This package does not predict assumptions. It applies them. Every growth
+rate, margin target, and dollar figure is caller-supplied; nothing here
+guesses at what a "downside" scenario should look like on its own. This
+mirrors `valuation/dcf`'s identical "the caller forecasts, this package
+only computes" boundary — `dcf.Input.ForecastPeriods` takes free cash flow
+as an opaque caller-supplied series and only discounts it; `forecast` is
+the natural upstream complement that can *produce* that series (via
+`ScenarioResult.CashFlow[i].FreeCashFlow`) from assumptions. The two
+packages remain fully independent — `forecast` never calls into
+`valuation/dcf` — a caller wanting a DCF valuation off a `forecast` run
+feeds the projected free cash flow into `dcf.Input` itself.
+
+Unlike `analytics/variance`/`concentration` (which define their own
+portable tuple, independent of `financial.FinancialDataset`), this package
+reads its historical base directly from a normalized
+`financial.FinancialDataset`, exactly like `analytics/qoe`/
+`workingcapital`/`cashflow`/`revenuequality`/`anomalies` — a forecast
+starts from real historical actuals, so there is no case for a
+dataset-independent input shape here. Every forecast period's P&L line is
+keyed by `financial.Code`, so `EBITDA`/`SDE`/margins reuse this
+repository's one canonical set of code buckets (`financial.
+CodesByCategory`) rather than a second, forecast-specific taxonomy.
+
+Every function is pure — no I/O, no mutation of caller-owned input — and
+`Calculate` returns byte-for-byte identical JSON across repeated runs
+against identical input, regardless of Go's randomized map iteration order.
+
+```go
+res := forecast.Calculate(forecast.Input{
+    Dataset: historicalDataset, // financial.FinancialDataset
+    PeriodMeta: map[financial.Period]forecast.PeriodInfo{
+        "2025": {Type: forecast.PeriodTypeFiscalYear, FiscalYear: 2025},
+    },
+    Horizon:              3,
+    ForecastPeriodLabels: []string{"2026", "2027", "2028"},
+    Scenarios: []forecast.Scenario{
+        {
+            Name: "Base", Type: forecast.ScenarioTypeBase,
+            Assumptions: forecast.Assumptions{
+                Revenue: []forecast.RevenuePeriodAssumption{
+                    {Method: forecast.RevenueMethodGrowthRate, GrowthRate: 0.08},
+                    {Method: forecast.RevenueMethodGrowthRate, GrowthRate: 0.08},
+                    {Method: forecast.RevenueMethodGrowthRate, GrowthRate: 0.08},
+                },
+                COGS: []forecast.COGSPeriodAssumption{
+                    {Method: forecast.COGSMethodGrossMarginPercent, GrossMarginPercent: 0.55},
+                    {Method: forecast.COGSMethodGrossMarginPercent, GrossMarginPercent: 0.55},
+                    {Method: forecast.COGSMethodGrossMarginPercent, GrossMarginPercent: 0.55},
+                },
+                Opex: []forecast.OpexPeriodAssumption{
+                    {Method: forecast.OpexMethodGrowthRate, GrowthRate: 0.04},
+                    {Method: forecast.OpexMethodGrowthRate, GrowthRate: 0.04},
+                    {Method: forecast.OpexMethodGrowthRate, GrowthRate: 0.04},
+                },
+            },
+        },
+    },
+})
+
+for _, sr := range res.ScenarioResults {
+    for _, p := range sr.ProjectedPeriods {
+        fmt.Println(sr.Name, p.Period, p.TotalRevenue.Value, p.EBITDA.Value)
+    }
+}
+```
+
+#### The historical base
+
+`Calculate` identifies the base period as the chronologically **last**
+period in `Input.Dataset`, per `Input.PeriodMeta` — never by lexical or
+dataset-item order (the same no-guessing rule `financial/metrics` and
+every dataset-bound `analytics/` sibling already follows). Unlike those
+siblings, a missing or incomplete `PeriodMeta` here is a **blocking**
+`SeverityError` (`Result.Available == false`), not merely an advisory
+warning: this package has no fallback base period to project forward from
+at all without chronological order, whereas a sibling merely loses a
+trend/seasonality output it can otherwise do without. `Result.Base` reports
+the identified period's actual P&L and working capital, computed with the
+exact same EBIT/EBITDA/SDE/margin formulas `financial/metrics` uses (see
+`base.go`'s `buildBasePL`, deliberately duplicated from `financial/metrics`
+rather than depending on its full `Snapshot` machinery — the same choice
+`analytics/workingcapital` already made for its own formulas). Every
+`Scenario` in one `Calculate` call projects forward from this identical
+base — scenarios differ only in `Assumptions`, never in starting point.
+
+#### Assumption shape: aggregate default plus per-code override
+
+`RevenuePeriodAssumption`/`OpexPeriodAssumption` each carry one aggregate
+growth rate (or fixed amount) applied to every code in that section without
+its own entry in `CodeOverrides`, plus a list of specific
+`financial.Code` overrides that take precedence for that code alone — the
+same "aggregate default, explicit override wins" precedence
+`variance.Policy.DirectionOverrides` and `workingcapital.InclusionPolicy`
+already use elsewhere in this repository. A caller who only wants "grow
+revenue 10%, hold opex flat" supplies one aggregate rate per period and
+never touches `CodeOverrides`; a caller modeling, say, a specific
+product line's revenue growing faster than the rest supplies one
+`RevenueCodeAssumption` entry for that code, leaving every other revenue
+code at the aggregate rate. `COGSPeriodAssumption` has no per-code override
+(gross margin is inherently an aggregate ratio against total revenue);
+its result is spread across COGS codes proportionally to the base period's
+mix, exactly like `RevenueMethodFixedAmount`'s proportional split for
+revenue.
+
+A period with the zero-value assumption (an empty slice entry, or a
+`Scenario` whose assumption slice is shorter than `Input.Horizon`) is not
+treated as "no assumption at all" for revenue/COGS/opex — it defaults to
+flat, 0%-growth carry-forward from the prior period (`RevenueMethodGrowthRate`/
+`OpexMethodGrowthRate` with a 0 rate, or `COGSMethodGrossMarginPercent`
+with a 0% target), since a zero-value revenue/opex assumption is
+unambiguous. `Calculate` still reports `MISSING_REVENUE_ASSUMPTION`/
+`MISSING_COGS_ASSUMPTION`/`MISSING_OPEX_ASSUMPTION` so the caller knows a
+default was silently applied. This is the opposite convention from
+`WorkingCapitalPeriodAssumption` and `TaxPeriodAssumption`/
+`DebtServiceAssumption`, where a missing assumption leaves that period's
+figure genuinely `Unavailable` rather than defaulting to something that
+could be mistaken for a deliberate choice (0% of revenue, or $0 tax, are
+not unambiguous defaults the way flat revenue growth is).
+
+#### One-time items don't compound: `OpexMethodExcludeAmount`
+
+Because every non-overridden opex code's amount grows from "whatever the
+prior period actually reported for that code," a one-time expense added
+via a `FixedAmount` override in period *N* would otherwise silently become
+part of period *N+1*'s growth base too, permanently inflating every
+subsequent period's trajectory by a cost that was only ever meant to hit
+once. `OpexMethodExcludeAmount` solves this generally: it grows a code from
+`(prior period's reported amount - ExcludeFromBase) x (1 + GrowthRate)`
+rather than from the prior amount alone. `ApplyOneTimeCostShock` (see
+[Scenario-transformation helpers](#scenario-transformation-helpers)
+below) sets this automatically on the period immediately following the
+one-time item, so a caller using that helper gets a truly one-time cost
+with zero extra effort; a caller building `Assumptions` by hand can use
+`OpexMethodExcludeAmount` directly for the same effect on any code.
+
+#### Cash flow, working capital, and debt-service coverage
+
+`WorkingCapitalPeriodAssumption` projects one period's operating NWC as a
+percent of that period's projected revenue (`WorkingCapitalMethodPercentOfRevenue`,
+the common "NWC scales with revenue" convention), a fixed dollar figure, or
+held flat at the prior period's level. `CashFlowPeriod.OperatingCashFlow` is
+`EBITDA - ChangeInNWC - IncomeTax` (mirroring `analytics/cashflow`'s
+EBITDA-to-cash-flow bridge, adapted here to build forward from a
+projection rather than from a caller-reported cash-flow statement, since a
+forecast has no reported statement to read from by definition);
+`FreeCashFlow` subtracts `Capex`; `FreeCashFlowToOwner` further subtracts
+total debt service. `DebtServiceCoverage` divides
+`Input.DebtServiceCoverageSource` (`operating_cash_flow`, the default, or
+`ebitda`) by total debt service — left `Unavailable` (never "infinite")
+when total debt service is exactly zero, mirroring `metrics.grossMargin`'s
+identical zero-denominator guard. `DebtServiceAssumption.Interest` is
+recomputed as `BeginningBalance x InterestRate` whenever a period supplies
+both, rather than using a flat caller-supplied `Interest` figure directly —
+this is the mechanism `ApplyDebtRateShock` adjusts (see below).
+`TaxPeriodAssumption`'s `percent_of_pretax_income` method floors at $0: a
+projected pretax loss produces $0 projected tax, never a fabricated
+negative "tax benefit," since modeling a realizable tax benefit requires
+assumptions (carryback availability, valuation allowances) this package
+has no basis for.
+
+#### Scenario-transformation helpers
+
+`transform.go` exports small, composable pure functions that each return a
+*modified copy* of an `Assumptions` value (never mutating the caller's
+original) — a caller builds a downside/upside/custom `Scenario` by starting
+from a base `Assumptions` and applying one or more of these in sequence,
+rather than this package guessing what "downside" means on its own:
+
+| Helper | What it shifts |
+|---|---|
+| `ApplyRevenueShock(a, deltaGrowthRate, fromPeriod, horizon)` | Every in-window period's aggregate revenue growth rate, skipping any period already using `RevenueMethodFixedAmount` |
+| `ApplyMarginShock(a, deltaMarginPoints, fromPeriod, horizon)` | Every in-window period's gross-margin target, skipping `COGSMethodGrowthRate`/`COGSMethodFixedAmount` periods |
+| `ApplyExpenseShock(a, deltaGrowthRate, codes, fromPeriod, horizon)` | The aggregate opex growth rate when `codes` is empty, or specific `financial.Code` overrides (shifting an existing growth-rate override, or appending a new one) when `codes` is non-empty |
+| `ApplyCustomerLossShock(a, lossFraction, baseRevenue, fromPeriod, horizon)` | A permanent step-down in revenue at `fromPeriod` (computed by replaying the unshocked assumptions' own trajectory up to that point, then applying `1 - lossFraction`), with every later period continuing to compound from the newly-lowered base at its own already-specified rate |
+| `ApplyOneTimeCostShock(a, amount, code, period, horizon)` | Adds a single-period expense via a `FixedAmount` override, auto-pinning `period+1`'s override for the same code to `OpexMethodExcludeAmount` so the spike does not compound forward (see above) |
+| `ApplyDebtRateShock(a, deltaRate, fromPeriod, horizon)` | Every in-window period's `DebtServiceAssumption.InterestRate`, only where `InterestRate`/`BeginningBalance` are already both supplied |
+
+Every helper treats a `fromPeriod` beyond `horizon` as a valid no-op (an
+empty application window) rather than erroring, since a caller composing
+several shocks across different windows may legitimately end up with one
+that's empty for a given horizon.
+
+#### What `Result` contains
+
+| Field | What it is |
+|---|---|
+| `Base` | The historical base period's actual P&L (`PeriodPL`) and working capital — identical across every `ScenarioResult` in the same `Calculate` call. |
+| `ScenarioResults` | One `ScenarioResult` per valid `Input.Scenarios` entry (skipping empty/duplicate names — see `EMPTY_SCENARIO_NAME`/`DUPLICATE_SCENARIO_NAME`), each with `ProjectedPeriods`, `WorkingCapital`, `CashFlow`, a full `Trace`, and scenario-scoped `Warnings`. |
+| `PeriodPL` (on `Base.PL` and every `ProjectedPeriods` entry) | `RevenueLines`/`COGSLines`/`OpexLines` (per-`financial.Code`, sorted), `TotalRevenue`, `GrossProfit`/`GrossMargin`, `TotalOpex`, `EBIT`, `EBITDA`/`EBITDAMargin`, `SDE`/`SDEMargin`, `PretaxIncome`, `IncomeTax`, `NetIncome` — every derived figure using the exact same formula and availability rule as `financial/metrics`' identically-named metric. |
+| `WorkingCapital` | Per-period `NWC` and `ChangeInNWC` (positive = cash use, mirroring `cashflow.Bridge.ChangeInNWC`'s sign convention). |
+| `CashFlow` | Per-period `OperatingCashFlow`, `Capex`, `FreeCashFlow`, `DebtService`, `FreeCashFlowToOwner`, `DebtServiceCoverage`. |
+| `ForecastPeriods` | The resolved display label for each forecast period (`Input.ForecastPeriodLabels`, falling back to a generated `"Period N"`). |
+| `Warnings` / `Errors` | Structured `Issue`s (own `IssueCode` system — see [Error taxonomy](#error-taxonomy)), each optionally scoped to one `Scenario`/`Period`. |
+
+#### Exported surface, by file
+
+- **`types.go`** — `Input`, `PeriodInfo`/`PeriodType`, `ForecastValue`/
+  `Unavailable`/`AvailableValue`, `RevenueMethod`/`RevenuePeriodAssumption`/
+  `RevenueCodeAssumption`, `COGSMethod`/`COGSPeriodAssumption`,
+  `OpexMethod`/`OpexPeriodAssumption`/`OpexCodeAssumption`,
+  `DepreciationAmortizationAssumption`, `CapexAssumption`,
+  `WorkingCapitalMethod`/`WorkingCapitalPeriodAssumption`,
+  `TaxMethod`/`TaxPeriodAssumption`, `DebtServiceAssumption`,
+  `Assumptions`, `ScenarioType`, `Scenario`,
+  `DebtServiceCoverageSource`, `IssueCode`/`IssueSeverity`/`Issue`,
+  `HasErrors`, `LineItem`, `PeriodPL`, `WorkingCapitalPeriod`,
+  `CashFlowPeriod`, `ScenarioResult`, `TraceStep`, `BaseFinancials`,
+  `Result`, `FormulaVersion`.
+- **`base.go`** — historical-base derivation: `buildBasePL` (the
+  `financial/metrics`-formula-mirroring P&L build), `buildBaseWorkingCapital`,
+  `resolveBasePeriod` (chronological-order validation and last-period
+  selection), and the package's own `codeIndex`.
+- **`project.go`** — `projectScenario` (the per-period projection loop) and
+  every line-level projection function: `projectRevenue`, `projectCOGS`,
+  `projectOpex`, `projectTax`, `projectWorkingCapital`,
+  `resolveDebtServiceInterest`, `buildCashFlowPeriod`.
+- **`forecast.go`** — `Calculate(Input) Result`: top-level validation,
+  base-period resolution, and per-`Scenario` orchestration.
+- **`transform.go`** — every `Apply*` scenario-transformation helper (see
+  above) and `cloneAssumptions`, the deep-enough copy every helper builds
+  on so none of them ever mutates a caller's `Assumptions`.
+
+See [`analytics/forecast/forecast_test.go`](analytics/forecast/forecast_test.go),
+[`analytics/forecast/transform_test.go`](analytics/forecast/transform_test.go),
+[`analytics/forecast/determinism_test.go`](analytics/forecast/determinism_test.go),
+and [`analytics/forecast/roundtrip_test.go`](analytics/forecast/roundtrip_test.go)
+for every scenario the task requires (base/downside/upside scenarios
+projected from an identical base, negative growth, margin compression,
+missing revenue/COGS/opex assumptions falling back to a flat default,
+multi-year compounding, no hidden mutation of `Input.Dataset`/`Scenarios`/
+`Assumptions`, every scenario-transformation helper individually and
+end-to-end through `Calculate`, the working-capital/cash-flow/debt-service-
+coverage bridge, and JSON/determinism including a map-order stress test)
+exercised against both hand-built fixtures and the repository's realistic
+`normalized_hvac_multi_year.json` fixture.
+
 ### `valuation`
 
 Implements the individual valuation methods themselves: SDE multiple,
@@ -4407,6 +4655,7 @@ persist historical valuations").
 | Concentration analysis formulas | `concentration.FormulaVersion`, echoed on `concentration.Result.FormulaVersion` | The top-N-share/HHI formulas, the entity-ranking and `DependencyChange` methodology, the lost-entity/top-N-loss `Scenario` formulas (including the optional earnings-impact conversion), and the `DefaultThresholds` flag-trigger rules (`analytics/concentration`) |
 | Anomaly detection rules | `anomalies.FormulaVersion`, echoed on `anomalies.Result.FormulaVersion` | Every `RuleCode`'s exact comparison method (spike/variance/growth-gap/margin/materiality/gap/duplicate/sign/negative-amount detection) and the `DefaultThresholds` trigger points (`analytics/anomalies`) |
 | Variance analysis formulas | `variance.FormulaVersion`, echoed on `variance.Result.FormulaVersion` | The absolute/percentage variance formulas, the favorable/unfavorable direction rules (taxonomy-category defaults, the mixed other-income-statement per-code rule, and `DirectionOverrides` precedence), the materiality test, the contribution-to-total-variance formula, the category rollup, and the period-trend formula (`analytics/variance`) |
+| Forecast/scenario formulas | `forecast.FormulaVersion`, echoed on `forecast.Result.FormulaVersion` | The historical-base derivation, the per-period compounding rule for revenue/COGS/opex (aggregate-plus-override precedence, the `FixedAmount` proportional-split rule, `OpexMethodExcludeAmount`'s one-time-item exclusion), the EBIT/EBITDA/SDE/margin/tax/net-income formulas, the working-capital and cash-flow bridge, the debt-service-coverage formula, and every `Apply*` scenario-transformation helper's exact arithmetic (`analytics/forecast`) |
 | AI request/response schema | `ai.RequestSchemaVersion`, echoed on `ai.Provenance.RequestSchemaVersion` | The `Request`/`Response` wire shape `financial/classification/ai` sends to/expects from a `Classifier` |
 | AI fallback orchestration | `ai.OrchestrationVersion`, echoed on `ai.Provenance.OrchestrationVersion` | The trigger/fallback/safety decision logic in `ClassifyWithFallback`/`ClassifyBatchWithFallback` (which `FallbackMode` runs AI when, structural-row skipping, disagreement handling) |
 | OpenAI adapter (classification) | `openai.AdapterVersion`, echoed on `ai.Provenance.AdapterVersion` | This specific provider adapter's prompt-construction/response-parsing logic (`financial/classification/ai/openai`) |
@@ -4475,6 +4724,10 @@ unverified incidental property of the standard library).
 | `variance.Result.TopUnfavorable` | Ascending by `AbsoluteVariance.Value` (most negative-impact-magnitude first), ties broken by `AccountCode` then `Period` |
 | `variance.Result.MaterialExceptions` | Same order as `LineVariances`, filtered to `MaterialityMaterial` |
 | `variance.Result.PeriodTrends` | Chronological when `Input.PeriodMeta` covers every period present; falls back to lexical `Period` order when `PeriodMeta` is nil/partial (`analytics/variance`) |
+| `forecast.Result.ScenarioResults` | Same order as `Input.Scenarios`, skipping any entry with an empty or duplicate `Name` (`analytics/forecast`) |
+| `forecast.ScenarioResult.ProjectedPeriods` / `WorkingCapital` / `CashFlow` | Forecast-period-number order, `1..Input.Horizon`, always — there is no chronological-vs-lexical fallback here (unlike every dataset-bound sibling above) since a forecast period has no `financial.Period` string to order by in the first place |
+| `forecast.PeriodPL.RevenueLines` / `COGSLines` / `OpexLines` | Sorted by `financial.Code` ascending (`analytics/forecast`'s `sortedCodesByAmount`), never Go map order |
+| `forecast.ScenarioResult.Trace` | Calculation order: for each forecast period in sequence, one `TraceStep` per line as it was computed (Total Revenue, Total COGS, Gross Profit, Total Opex, EBIT, EBITDA, SDE, Pretax Income, Net Income) |
 
 ## Error taxonomy
 
@@ -4609,6 +4862,27 @@ message strings:
   fields computed unconditionally for every line (not conditional signals
   that may or may not fire), so there is no analogous "quality signal"
   layer to split out.
+- **`forecast.Issue{Code forecast.IssueCode, Severity, Scenario, Period, Message}`** —
+  `analytics/forecast`'s own separate system (`NO_PERIODS`,
+  `NO_PERIOD_META`, `INVALID_HORIZON`, `NO_SCENARIOS`,
+  `EMPTY_SCENARIO_NAME`, `DUPLICATE_SCENARIO_NAME`, `NO_BASE_REVENUE`,
+  `MISSING_REVENUE_ASSUMPTION`, `MISSING_COGS_ASSUMPTION`,
+  `MISSING_OPEX_ASSUMPTION`, `IMPLIED_ZERO_GROSS_MARGIN`,
+  `NEGATIVE_PROJECTED_VALUE`), for the same reason as every other
+  `analytics/` sibling above: a forecast-input problem is its own problem
+  domain. Unlike its siblings, `Issue` here carries two extra optional
+  scope fields — `Scenario` (the `Scenario.Name` an issue applies to) and
+  `Period` (the forecast-period label) — since a single `Calculate` call
+  can produce issues scoped to one specific scenario/period among several
+  running side by side, not just to the whole `Result`; a `Scenario`-scoped
+  issue is duplicated onto that `ScenarioResult.Warnings` in addition to
+  `Result.Warnings` so a caller working with one `ScenarioResult` in
+  isolation still sees it. Unlike every sibling above, a missing
+  `PeriodMeta` here is a blocking `SeverityError`
+  (`Result.Available == false`), not an advisory warning: this package
+  cannot identify the historical base period to project forward from at
+  all without chronological order, whereas siblings merely lose a
+  trend/seasonality output.
 - **`ai.Issue{RowID, Code ai.IssueCode, Severity, Message}`** —
   `financial/classification/ai`'s own separate system (`AI_DISABLED`,
   `AI_PROVIDER_UNAVAILABLE`, `AI_TIMEOUT`, `AI_PROVIDER_ERROR`,
