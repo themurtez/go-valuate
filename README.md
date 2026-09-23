@@ -270,6 +270,7 @@ go-valuate/
   analytics/benchmarks/      caller-supplied company metrics vs. caller-supplied benchmark datasets: percentile/band placement, difference, favorable/unfavorable
   analytics/valuedrivers/    deterministic driver/scenario sensitivity: re-runs orchestrator+consensus under caller-defined metric/assumption changes, one-factor-at-a-time and combined
   transactions/acquisition/ acquisition screening: price multiples, consensus premium/discount, financing/DSCR (via analytics/debt), returns, scenarios, caller-defined red flags
+  transactions/dealstructure/ acquisition financing structure: sources and uses, debt tranches/seller note (own amortization engine incl. balloons), earnout schedule, funding gap/surplus
   valuation/                 common valuation result envelope (value types, bridge, issues)
   valuation/sde/              SDE multiple method
   valuation/ebitda/           EBITDA multiple method
@@ -4919,6 +4920,136 @@ compensation deductions, an invalid debt tranche, the degenerate empty-
 input case, no-mutation-of-caller-input, and full JSON round-trip/
 determinism coverage).
 
+### `transactions/dealstructure`
+
+A deterministic **acquisition financing structure** calculator: given a
+purchase price, a buyer equity contribution, zero or more debt tranches,
+an optional seller note, an optional deterministic earnout schedule, and
+optional fees/working-capital/closing-adjustment inputs, this package
+derives the deal's sources and uses, financing-percentage breakdown, and
+every financing instrument's full period-by-period payment schedule —
+**how the deal is financed**, never what the business is worth. It
+computes no valuation, no DSCR, no leverage ratio, and no buyer return of
+its own; a caller feeding this package's output onward into
+`transactions/acquisition` supplies that package's own
+`Financing.DebtTranches`/coverage inputs separately.
+
+**Dataset-independent, like `transactions/acquisition`/`analytics/debt`/
+`analytics/covenants`.** This package has no dependency on
+`financial.FinancialDataset` — every input is a deal fact (a purchase
+price, a lender's term sheet, a negotiated seller-note rate, an
+already-agreed earnout schedule) with no financial-statement-traversal
+representation.
+
+**Its own amortization engine, not `analytics/debt.Amortize`.** That
+function derives only a first-year and steady-state annual debt service
+figure, never a full period-by-period schedule, and `debt.LoanTerms` has
+no balloon field — both of which this package's brief explicitly
+requires ("payment schedule," "interest/principal by period," "balloon
+if supplied"). Rather than force a balloon-capable, full-schedule
+amortizer into an awkward shared dependency with a package whose
+`LoanTerms`/`Value` types were not designed for it, `amortize` (in
+`amortization.go`) implements the same standard level-payment formula
+`analytics/debt.Amortize` already uses, extended with a full
+`[]PeriodDebtService` schedule and balloon-payment sizing. `DebtTranche`
+and `SellerNote.Terms` share this identical engine, since a seller note
+is amortized exactly like any other debt tranche — it is only tracked
+separately in `Result` because a caller's sources-and-uses and
+financing-percentage breakdown always distinguish seller financing from
+third-party debt.
+
+**`TermYears` vs. `AmortizationYears`, and how a balloon arises.** A
+tranche's payment is always sized against `AmortizationYears` (the
+schedule shape), but the tranche's actual life is `TermYears` — which
+may be shorter. Three distinct situations all resolve to the same
+underlying event in the schedule's final period ("the tranche comes due
+with some balance still remaining, so that balance is paid as a
+balloon," per `PeriodDebtService.Balloon`): an explicit
+`BalloonAmount` sized directly into the payment formula (the payment is
+solved so the balance reaches exactly `BalloonAmount` at `TermYears`);
+`TermYears < AmortizationYears` with `BalloonAmount` unset (the loan
+simply comes due with whatever balance its normal `AmortizationYears`-
+sized payment naturally leaves at that point — an implicit, unsized
+balloon); and a tranche whose entire `TermYears` falls inside its own
+`InterestOnlyYears` (e.g. a 2-year interest-only bridge loan due in full
+at year 2, where no amortization ever occurs and the full original
+principal comes due as a balloon at maturity). `validateTrancheTerms`
+rejects a `BalloonAmount` that exceeds what the loan's own amortization
+schedule would leave outstanding at `TermYears` (`balloonCeiling`) —
+a balloon larger than the loan's own remaining balance is not a coherent
+input.
+
+**Earnout is deterministic-schedule-only.** `Earnout.Payments` is a set
+of already-agreed `EarnoutPayment` entries (period + amount), never a
+formula this package evaluates against future performance — per the task
+brief ("earnout if deterministic schedule supplied"). A contingent,
+performance-based earnout is out of scope, since evaluating one would
+require forecasting the target's future performance, a concern this
+package does not take on. `Result.EarnoutSchedule` sorts by
+`PeriodNumber` (ties broken by input order) regardless of the order
+supplied.
+
+**Availability, not silence.** `TotalDebtFinancing`/`SellerNoteAmount`/
+`TotalEarnoutAmount` are known-zero (not unavailable) once `Build` runs
+at all — "no third-party debt"/"no seller note"/"no earnout" is a known
+figure of zero, not a missing one — mirroring
+`acquisition.SourcesAndUses.TotalDebtFinancing`'s identical convention.
+An invalid debt tranche (negative amount/rate, non-positive
+amortization/term years, `TermYears > AmortizationYears`, an
+unrecognized frequency, an interest-only period at least as long as the
+amortization period, or an incoherent balloon) is excluded from every
+downstream calculation and reported as a `SeverityError` `Issue`, never
+silently amortized anyway — the same treatment `IssueInvalidEarnoutPayment`
+gives one bad earnout entry (excluded, not blocking the rest of the
+schedule or `Result.Available`).
+
+**`FundingGapOrSurplus` is signed, neutral arithmetic**, mirroring
+`acquisition.ConsensusComparison.Premium`'s signed-value convention:
+positive means the deal's sources exceed its uses (a surplus), negative
+means a funding gap. A negative value is recorded as advisory
+`IssueFundingGap` but never blocks `Result.Available` — the caller sees
+the exact gap size and decides how to close it (more equity, more debt,
+a lower price).
+
+Files:
+
+- **`types.go`** — `Value`/`Unavailable`/`AvailableValue`,
+  `PaymentFrequency`, `DebtTranche`, `SellerNote`, `EarnoutPayment`,
+  `Earnout`, `TransactionFees`, `WorkingCapitalContribution`,
+  `ClosingAdjustments`, `Input`, `IssueCode`/`IssueSeverity`/`Issue`/
+  `HasErrors`, `PeriodDebtService`, `AmortizationSchedule`,
+  `AnnualDebtServicePeriod`, `SourcesAndUses`, `FinancingPercentages`,
+  `Result`, `FormulaVersion`.
+- **`amortization.go`** — `validateTrancheTerms`, `balloonCeiling`,
+  `amortize` (the level-payment/balloon-sizing formula and the
+  period-by-period declining-balance simulation), `levelPayment`,
+  `buildPeriods`, `firstYearDebtService`.
+- **`sourcesanduses.go`** — `computeSourcesAndUses`,
+  `computeFinancingPercentages`.
+- **`earnout.go`** — `buildEarnoutSchedule`: validation, exclusion of
+  invalid entries, and the `PeriodNumber` sort.
+- **`annualdebtservice.go`** — `aggregateAnnualDebtService`: sums
+  principal/interest/balloon across every tranche (of possibly differing
+  frequencies and term lengths) year by year.
+- **`dealstructure.go`** — `Build(Input) Result`: tranche/seller-note
+  validation and amortization, sources-and-uses/financing-percentage
+  orchestration, and annual-debt-service aggregation.
+
+See [`transactions/dealstructure/dealstructure_test.go`](transactions/dealstructure/dealstructure_test.go),
+[`transactions/dealstructure/determinism_test.go`](transactions/dealstructure/determinism_test.go),
+and [`transactions/dealstructure/roundtrip_test.go`](transactions/dealstructure/roundtrip_test.go)
+for every case the task requires (a single loan, multiple tranches of
+differing rates/frequencies/terms, a seller note, an explicit balloon, a
+`TermYears`-driven implicit balloon, an interest-only period, an
+interest-only period spanning the tranche's entire term, a funding gap, a
+funding surplus, every kind of invalid tranche input, a suspicious
+(likely-whole-number-percent) interest rate, an earnout schedule with an
+invalid entry, a zero-interest-rate tranche, closing adjustments, fees,
+working capital, financing supplied with no purchase price, the
+degenerate empty-input case, no-mutation-of-caller-input (including the
+earnout-sort not mutating the caller's slice in place), and full JSON
+round-trip/determinism coverage for both `Input` and `Result`).
+
 ### `valuation/e2e`
 
 Not a reusable package — a single end-to-end deterministic fixture test
@@ -5250,6 +5381,7 @@ persist historical valuations").
 | Benchmark comparison formulas | `benchmarks.FormulaVersion`, echoed on `benchmarks.Result.FormulaVersion` | The percentile-band/quartile linear-interpolation rule, the peer-observation rank-based percentile estimate, the non-decreasing-value precondition and its `IssueNonMonotonicBenchmarkPoints` guard, the band-placement rule, the difference/relative-difference formulas, and the favorable/unfavorable classification rule (`analytics/benchmarks`) |
 | Value driver/scenario formulas | `valuedrivers.FormulaVersion`, echoed on `valuedrivers.Result.FormulaVersion` | Every `DriverType`'s exact per-method mutation rule (which `Input` field(s) it changes and how), the `LinkageApplied`/`LinkageNotApplicable`/`LinkageMethodExcluded` classification, the one-factor-at-a-time vs. combined-scenario compounding order, and the value/percent-delta formulas (`analytics/valuedrivers`) |
 | Acquisition screening formulas | `acquisition.FormulaVersion`, echoed on `acquisition.Result.FormulaVersion` | The price-to-revenue/EBITDA/SDE multiple formulas, the premium/discount-to-consensus formula, the sources-and-uses/required-equity arithmetic, the annual-debt-service/DSCR/post-debt-cash-flow formulas (via `analytics/debt.Amortize`), the cash-on-cash-return/simple-payback-period formulas, the leverage formula, the downside/upside scenario methodology, and the red-flag threshold rules (`transactions/acquisition`) |
+| Deal-structure/financing formulas | `dealstructure.FormulaVersion`, echoed on `dealstructure.Result.FormulaVersion` | The sources-and-uses/required-equity/funding-gap arithmetic, this package's own per-tranche amortization formula (including interest-only handling and balloon-payment sizing — distinct from `analytics/debt.Amortize`'s formula), the seller-note and earnout schedule derivations, the financing-percentage formula, and the annual-debt-service aggregation across tranches (`transactions/dealstructure`) |
 | AI request/response schema | `ai.RequestSchemaVersion`, echoed on `ai.Provenance.RequestSchemaVersion` | The `Request`/`Response` wire shape `financial/classification/ai` sends to/expects from a `Classifier` |
 | AI fallback orchestration | `ai.OrchestrationVersion`, echoed on `ai.Provenance.OrchestrationVersion` | The trigger/fallback/safety decision logic in `ClassifyWithFallback`/`ClassifyBatchWithFallback` (which `FallbackMode` runs AI when, structural-row skipping, disagreement handling) |
 | OpenAI adapter (classification) | `openai.AdapterVersion`, echoed on `ai.Provenance.AdapterVersion` | This specific provider adapter's prompt-construction/response-parsing logic (`financial/classification/ai/openai`) |
