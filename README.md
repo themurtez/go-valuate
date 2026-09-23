@@ -273,6 +273,7 @@ go-valuate/
   transactions/acquisition/ acquisition screening: price multiples, consensus premium/discount, financing/DSCR (via analytics/debt), returns, scenarios, caller-defined red flags
   transactions/dealstructure/ acquisition financing structure: sources and uses, debt tranches/seller note (own amortization engine incl. balloons), earnout schedule, funding gap/surplus
   transactions/salereadiness/ deterministic sale-readiness assessment: 11 dimension statuses from optional QoE/working-capital/concentration/revenue-quality/consensus/metrics results plus a business profile, blockers/risks/strengths/missing-information/opportunities, optional overall score
+  portfolio/diagnostics/     multi-business portfolio scan: ranked findings (margin/revenue/cash/leverage/concentration/valuation/quality/sale-readiness) from condensed per-business summaries, configurable priority score, coverage/missing-data summary
   valuation/                 common valuation result envelope (value types, bridge, issues)
   valuation/sde/              SDE multiple method
   valuation/ebitda/           EBITDA multiple method
@@ -5335,6 +5336,104 @@ records, missing analytical modules, negative earnings, no-Policy
 threshold fallback, the degenerate empty-input case,
 no-mutation-of-caller-input, and full JSON round-trip/determinism
 coverage).
+
+### `portfolio/diagnostics`
+
+A deterministic **accountant client-portfolio scan**: given a slice of
+`BusinessSnapshot` (one per business/period, each a condensed summary of
+whichever sibling analytics packages a caller has already run —
+`analytics/qoe`, `analytics/ratios`, `analytics/concentration`,
+`analytics/cashflow`, `valuation/consensus`, `transactions/salereadiness`
+— plus a small caller-chosen `SelectedMetrics` block and an optional
+`Prior` snapshot), `Calculate` scans the whole book and returns a ranked
+list of `Finding`s pointing at accounts needing attention or advisory
+follow-up. It answers "which clients in this book need a look, and why,"
+never "should we pitch this client anything" — **findings state facts,
+never sales pitches**.
+
+**One level above `transactions/salereadiness`, not a duplicate of it.**
+Where salereadiness assesses *one* business across 11 fixed dimensions
+from several full sibling `Result`s, diagnostics assesses *many*
+businesses from small condensed summaries of those same sibling packages,
+ranking findings across the whole portfolio rather than dimensions within
+one business. `BusinessSnapshot` deliberately embeds `QoESummary`/
+`RatioHealthSummary`/`ConcentrationSummary`/`CashFlowSummary`/
+`ValuationSummary`/`SaleReadinessSummary` — condensed, caller-populated
+structs with a handful of fields each — rather than the full sibling
+`Result` types salereadiness embeds, so a multi-hundred-business portfolio
+payload stays proportional to what diagnostics actually needs.
+
+**Trend findings require a `Prior` snapshot; single-period findings do
+not.** `BusinessSnapshot.Prior` is an optional pointer to that same
+business's previous-period snapshot. Six of the eight `FindingCode`s
+(`MARGIN_DETERIORATION`, `REVENUE_DECLINE`, `CASH_CONVERSION_WEAKENING`,
+`LEVERAGE_INCREASE`, `CONCENTRATION_INCREASE`, `VALUATION_MOVEMENT`) are
+primarily change-based and compare `Prior` against the current snapshot
+under `Policy.MaterialChangePercent`; four of those six also fall back to
+firing at `SeverityWarning` off an already-computed sibling signal alone
+(e.g. `RatioHealthSummary.HasRisingLeverageSignal`) when no `Prior` is
+available, so a first-period business is not silently invisible to
+diagnostics. The remaining two codes (`UNRESOLVED_FINANCIAL_QUALITY`,
+`SALE_READINESS_OPPORTUNITY`) are single-period reads and fire with no
+`Prior` at all. `VALUATION_MOVEMENT` is the one finding that fires on a
+rise as well as a decline, since a large swing either direction is itself
+the signal worth a conversation.
+
+**Missing modules narrow coverage, never invent a finding.** Every
+`BusinessSnapshot` summary field is independently optional; an absent
+summary simply means the `detect*` rules that depend on it cannot fire for
+that business — never scored as though it were a concerning finding. A
+business with every summary at its zero value produces zero findings, not
+a wall of "missing data" warnings (`Result.Coverage` reports the gap
+instead — see `CoverageCounts`).
+
+**Priority score is one explicit, configurable formula.** `Finding.
+PriorityScore = Policy.SeverityWeights[Severity] * (1 + |Change|)` when
+`Change` is available, else just the severity weight — `score.go`'s
+`computePriorityScore`, never an opaque or learned ranking.
+`Policy.SeverityWeights` is fully caller-configurable (including setting a
+severity's weight to exactly `0` to exclude it from ranking entirely —
+honored, not silently replaced by `DefaultPolicy`); any weight left
+unset in a caller's map falls back to `DefaultPolicy.SeverityWeights` via
+`resolvePolicy`. `Result.Findings` is always sorted by `PriorityScore`
+descending, then `FindingCode` declaration order, then `BusinessID`
+ascending — a fully specified, tested tie-break chain, never left to
+map/slice iteration order.
+
+**No sales pitches.** Every `Finding.Reason` is built entirely from
+already-computed fields, and `SuggestedReviewCategory` names a
+conversation topic (`PROFITABILITY`, `CASH_FLOW`, `RISK`, `VALUATION`,
+`FINANCIAL_QUALITY`, `TRANSACTION_READINESS`), never a specific
+engagement, product, or dollar-value pitch — mirroring
+`transactions/salereadiness`'s identical no-promise discipline.
+
+Files:
+
+- **`types.go`** — `Value`/`Unavailable`/`AvailableValue`, `Direction`,
+  `SelectedMetrics`, `QoESummary`, `RatioHealthSummary`,
+  `ConcentrationSummary`, `CashFlowSummary`, `ValuationSummary`,
+  `SaleReadinessSummary`, `BusinessSnapshot`, `Policy`/`DefaultPolicy`/
+  `resolvePolicy`, `Input`, `Severity`, `FindingCode`/`findingOrder`,
+  `ReviewCategory`, `Finding`, `CoverageCounts`, `PortfolioCounts`,
+  `IssueSeverity`/`IssueCode`/`Issue`/`HasErrors`, `Result`,
+  `FormulaVersion`, `ScoreVersion`.
+- **`findings.go`** — `percentChange`/`changeDirection`/
+  `severityForDirection` (shared change-magnitude/materiality/severity
+  helpers), one `detect*` function per `FindingCode`, `detectFindings`.
+- **`score.go`** — `computePriorityScore`, `sortFindings`.
+- **`diagnostics.go`** — `Calculate(Input) Result`: business-ID
+  validation/dedup, per-business finding detection, ranking, portfolio-
+  level counts, coverage summary.
+
+See [`portfolio/diagnostics/diagnostics_test.go`](portfolio/diagnostics/diagnostics_test.go),
+[`portfolio/diagnostics/determinism_test.go`](portfolio/diagnostics/determinism_test.go),
+and [`portfolio/diagnostics/roundtrip_test.go`](portfolio/diagnostics/roundtrip_test.go)
+for every case the task requires (a multi-client portfolio, missing
+modules/entirely empty snapshots, equal-severity/deterministic tie-break
+ordering, trend changes on every finding code, a signal-only no-`Prior`
+path, custom `Policy` thresholds/weights including an explicit zero
+weight, no-mutation-of-caller-input, and full JSON round-trip/determinism/
+concurrency coverage).
 
 ### `valuation/e2e`
 
