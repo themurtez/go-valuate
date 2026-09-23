@@ -270,6 +270,7 @@ go-valuate/
   analytics/benchmarks/      caller-supplied company metrics vs. caller-supplied benchmark datasets: percentile/band placement, difference, favorable/unfavorable
   analytics/valuedrivers/    deterministic driver/scenario sensitivity: re-runs orchestrator+consensus under caller-defined metric/assumption changes, one-factor-at-a-time and combined
   analytics/consolidation/  multi-entity consolidation: caller-driven ownership weighting, explicit FX conversion and intercompany eliminations, period-alignment/reconciliation issues, produces a consolidated financial.FinancialDataset
+  analytics/diagnostics/    single-business diagnostic engine: mines up to 15 optional sibling analytics/valuation results for their own already-computed flags/signals/anomalies/status classifications, republishes as categorized findings (strengths/concerns/opportunities), module coverage, optional overall health score — no new calculation, no narrative AI
   transactions/acquisition/ acquisition screening: price multiples, consensus premium/discount, financing/DSCR (via analytics/debt), returns, scenarios, caller-defined red flags
   transactions/dealstructure/ acquisition financing structure: sources and uses, debt tranches/seller note (own amortization engine incl. balloons), earnout schedule, funding gap/surplus
   transactions/salereadiness/ deterministic sale-readiness assessment: 11 dimension statuses from optional QoE/working-capital/concentration/revenue-quality/consensus/metrics results plus a business profile, blockers/risks/strengths/missing-information/opportunities, optional overall score
@@ -5572,6 +5573,146 @@ sorting across all four contributing sources, coverage/module-version
 counts, no-mutation-of-caller-input, and full JSON round-trip/determinism/
 concurrency coverage).
 
+### `analytics/diagnostics`
+
+A deterministic **single-business diagnostic engine**: given up to fifteen
+optional already-computed sibling results (`financial/metrics`,
+`analytics/ratios`, `analytics/qoe`, `analytics/workingcapital`,
+`analytics/cashflow`, `analytics/revenuequality`,
+`analytics/concentration`, `analytics/anomalies`, `analytics/variance`,
+`analytics/forecast`, `analytics/debt`, `analytics/covenants`,
+`analytics/benchmarks`, `analytics/valuedrivers`,
+`transactions/salereadiness`), `Calculate` mines whichever are available
+for their own already-computed Flags/Signals/Anomalies/Status
+classifications and republishes them as categorized `Finding`s. **This is
+not an AI narrative layer and computes no financial figure of its own** —
+every `Finding` traces back to a specific field on a specific sibling
+`Result` (a Flag/Signal/Anomaly `Code`, a covenant breach, an unfavorable
+benchmark comparison), never a generated summary.
+
+**A different altitude from both `transactions/salereadiness` and
+`portfolio/diagnostics`.** Where salereadiness classifies eleven fixed
+sale-readiness dimensions specifically and `portfolio/diagnostics` scans
+*many* businesses from condensed per-business summaries and ranks
+change-based findings across a whole book, `analytics/diagnostics` is
+single-business and mines the full depth of whichever sibling `Result`s a
+caller has on hand across twelve fixed diagnostic categories
+(profitability, growth, liquidity, leverage, cash conversion, working
+capital, revenue quality, concentration, earnings quality, operational
+cost control, valuation, transaction readiness) — the broadest-coverage,
+most granular of the three.
+
+**Nine of fifteen sibling packages have a genuine Flag/Signal/Anomaly list
+to mine directly** (`analytics/qoe`, `analytics/ratios`,
+`analytics/cashflow`, `analytics/revenuequality`,
+`analytics/concentration`, `analytics/anomalies`, `analytics/debt`, plus
+`analytics/covenants`' breach/near-breach `Status` and
+`analytics/benchmarks`' `Favorable` classification counted here since both
+serve the identical role) — `mine_flags.go`'s `genericFlag`/`mapFlag`
+translates the five packages sharing the exact `{Code, Severity, Period,
+Message, Value, Threshold}` Flag shape (`qoe`, `cashflow`,
+`revenuequality`, `concentration`, `debt`) through one shared function
+rather than five near-identical copies, since that shape is a genuine
+repository-wide convention, not a coincidence this package invented. The
+remaining six packages (`financial/metrics`, `analytics/workingcapital`,
+`analytics/variance`, `analytics/forecast`, `analytics/valuedrivers`,
+`transactions/salereadiness`) have no Flag/Signal of their own, so
+`mine_metrics.go`/`mine_status.go`/`mine_salereadiness.go` mine their
+`Trend.Direction`/`MaterialExceptions`/`Status`/`Opportunity` fields
+instead, each behind its own fixed reference threshold where no
+Policy-configurable one exists upstream (documented as part of
+`FormulaVersion`).
+
+**`Finding.Code` is a normalized taxonomy, `Finding.SourceCode` is full
+traceability.** Several sibling codes from different modules can map to
+the same `FindingCode` when they describe the same business-level
+observation from different angles (e.g. `ratios.SignalMarginCompression`
+and `qoe.FlagInconsistentMargins` both map to `FindingMarginPressure`), so
+a caller filtering by `FindingCode` sees one coherent signal regardless of
+which module(s) corroborate it — while `SourceCode` always echoes the
+exact origin Flag/Signal/RuleCode/Status/OpportunityCode string for full
+traceability back to the specific field that produced it. This package
+never suppresses or reconciles a contradiction between two sibling
+sources (e.g. `analytics/ratios` reporting improving profitability the
+same period `analytics/qoe` reports a critical earnings-quality flag) —
+both `Finding`s survive independently; this is a mining layer, not a
+narrative one that resolves disagreement.
+
+**Strengths/Concerns/Opportunities is a `Severity`-driven split, not a
+separate mining pass.** Every mined `Finding` is classified into exactly
+one of `Result.Strengths` (`SeverityInfo`, from an explicitly positive
+sibling classification like `ratios.SignalImprovingProfitability` or a
+`salereadiness.Strength` — absence of a Concern is never itself treated as
+a Strength), `Result.Concerns` (`SeverityWarning`/`SeverityCritical`), or
+`Result.Opportunities` (currently `salereadiness.Opportunity` only, always
+an improvement-area framing regardless of severity, echoing
+salereadiness's own no-guaranteed-outcome discipline).
+
+**`Coverage` mirrors `reporting/management`'s per-sibling-module shape**
+(`TotalModules`/`AvailableModules`/`CoveragePercent` plus one `WithX` bool
+per module and a `MissingModules` list in `Input`'s own field order) rather
+than `transactions/salereadiness.Coverage`'s abstract-dimension-count
+shape, since this package's Findings map to named sibling modules, not
+classified dimensions. `Result.MissingDataAreas` is the structured
+counterpart naming which diagnostic `Categories` each missing module would
+have contributed to.
+
+**`OverallHealthScore` is one explicit, optional formula** — `score.go`'s
+`computeHealthScore` starts every category with at least one available
+module at a neutral baseline, pulls it toward a Strength ceiling or a
+Concern floor (a critical Concern outweighs a warning one; multiple
+Concerns of the same severity in one category do not compound the
+penalty), and averages only across categories actually backed by an
+available module. `nil` whenever zero modules are available, or when the
+caller-configurable `Policy.MinCoveragePercentForScore` is set and not
+met — a Result with too little coverage has nothing meaningful for a
+formula to weight, never silently substituted.
+
+Files:
+
+- **`types.go`** — `Value`/`Unavailable`/`AvailableValue`, `Severity`,
+  `Category`/`categoryOrder`, `SourceModule`, `FindingCode`/
+  `findingSortOrder`, `Finding`, `Policy`/`DefaultPolicy`, `Input`,
+  `IssueSeverity`/`IssueCode`/`Issue`/`HasErrors`, `Coverage`,
+  `MissingDataArea`, `Score`/`ScoreComponent`, `Result`, `FormulaVersion`,
+  `ScoreVersion`.
+- **`mine_flags.go`** — `genericFlag`/`flagMapping`/`mapFlag` (the shared
+  Flag-to-Finding translator), `thresholdValue`/`comparisonLabelForValue`,
+  `mineQoE`/`mineCashFlow`/`mineRevenueQuality`/`mineConcentration`/
+  `mineDebt` and their five `*FlagTable`s.
+- **`mine_ratios.go`** — `mineRatios`/`ratioSignalTable` (the one Flag-
+  shaped source with an explicitly positive signal code).
+- **`mine_anomalies.go`** — `mineAnomalies`/`anomalyRuleTable`.
+- **`mine_status.go`** — `mineWorkingCapital`/`mineVariance`/
+  `mineCovenants`/`mineBenchmarks`/`mineValueDrivers` (the five
+  no-Flag/no-Signal sources, each mined from its own Status/Trend/
+  MaterialException/Favorable classification instead).
+- **`mine_metrics.go`** — `mineMetrics` (fallback-only when `QoE` is
+  unavailable, so the same EBITDA-volatility observation is never
+  double-reported from both sources).
+- **`mine_salereadiness.go`** — `mineSaleReadiness`/
+  `categoryForDimension` (Blockers/Risks/Strengths/Opportunities, the sole
+  source of `CategoryTransactionReadiness` findings).
+- **`coverage.go`** — `moduleCategories`/`moduleOrder`/`moduleAvailable`,
+  `buildCoverage`, `buildMissingDataAreas`.
+- **`score.go`** — `computeHealthScore`/`categoriesWithAvailableModule`,
+  `labelForHealthScore`.
+- **`diagnostics.go`** — `Calculate(Input) Result`: orchestrates every
+  `mine*` function, splits into Strengths/Concerns/Opportunities,
+  `sortFindings`.
+
+See [`analytics/diagnostics/diagnostics_test.go`](analytics/diagnostics/diagnostics_test.go),
+[`analytics/diagnostics/determinism_test.go`](analytics/diagnostics/determinism_test.go),
+and [`analytics/diagnostics/roundtrip_test.go`](analytics/diagnostics/roundtrip_test.go)
+for every case the task requires (a healthy business, a stressed business
+across most of the twelve categories, partial single-module input,
+contradictory signals from two sibling sources surviving independently,
+an unrecognized future Flag/RuleCode ignored rather than crashing, the
+`MinCoveragePercentForScore` gate, deterministic Category/Severity/
+FindingCode-ordered output regardless of `mine*` append order, no-map-
+order-dependence across twenty runs, no-mutation-of-caller-input, and full
+JSON round-trip/determinism/race coverage).
+
 ### `valuation/e2e`
 
 Not a reusable package — a single end-to-end deterministic fixture test
@@ -5914,6 +6055,8 @@ persist historical valuations").
 | AI adjustment-suggestion orchestration | `ai.OrchestrationVersion`, echoed on `ai.Provenance.OrchestrationVersion` | The batching/validation/provenance decision logic in `SuggestAdjustments`/`SuggestAdjustmentsBatch` (`financial/adjustments/ai`) — a distinct constant/package from classification's identically-named one |
 | OpenAI adapter (adjustment suggestions) | `openai.AdapterVersion`, echoed on `ai.Provenance.AdapterVersion` | This specific provider adapter's prompt-construction/response-parsing logic (`financial/adjustments/ai/openai`) |
 | Management-reporting pack assembly | `management.FormulaVersion`, echoed on `management.Report.FormulaVersion` | Which sibling fields populate each `Section` (`series.go`, `tables.go`, `issues.go`, `chart.go`), the KPI-selection rule (`kpi.go`), and the coverage/version-echo computation (`coverage.go`) (`reporting/management`) |
+| Business diagnostic mining rules | `diagnostics.FormulaVersion`, echoed on `diagnostics.Result.FormulaVersion` | Every `mine*` function's field-to-`Finding` mapping (`mine_flags.go`, `mine_ratios.go`, `mine_anomalies.go`, `mine_status.go`, `mine_metrics.go`, `mine_salereadiness.go`), the `Category` assignment per source, and the `Strengths`/`Concerns`/`Opportunities` split rule (`analytics/diagnostics`) |
+| Business diagnostic health score | `diagnostics.ScoreVersion`, echoed on `diagnostics.Score.Version` | The per-category neutral-baseline/Strength-ceiling/Concern-floor formula and the averaging-over-available-categories rule (`score.go`) — versioned separately from `diagnostics.FormulaVersion` since a caller may change which findings are mined independently of how already-mined findings are weighted into one composite score (`analytics/diagnostics`) |
 
 **The rule for bumping a version:** whenever a formula, an availability/
 validation rule, a default, a sign convention, or an output shape changes
@@ -5995,6 +6138,10 @@ unverified incidental property of the standard library).
 | `management.ExecutiveSummary.KPIs` | Fixed declaration order (revenue/gross-profit/EBITDA/net-income from metrics, EBITDA margin from profitability, current-ratio/net-debt-to-EBITDA from liquidity-leverage, free-cash-flow/conversion from cash flow, NWC from working capital, largest-customer share from concentration, recurring-revenue percent from revenue quality, indicated value from consensus); a KPI whose underlying figure is entirely unavailable is omitted, never included as an unavailable entry (`reporting/management`) |
 | `management.Coverage.MissingModules` | `Input`'s own field declaration order (metrics, ratios, cash flow, working capital, QoE, variance, forecast, anomalies, concentration, revenue quality, debt, covenants) restricted to the modules with `WithX == false` (`reporting/management`) |
 | `management.ModuleVersions.Modules` | Fixed order matching `Coverage`'s `WithX` field order plus `consensus` last — always all 13 entries regardless of availability, an unavailable module's `Version` is empty rather than the entry being omitted (`reporting/management`) |
+| `diagnostics.Result.Findings` | By `categoryOrder` (profitability through transaction readiness), then by `Severity` descending (critical, warning, info), then by `FindingCode` declaration order, then by `Period` ascending, then by `SourceCode` ascending — a real `sort.SliceStable` (`diagnostics`'s `sortFindings`), never left to `Calculate`'s internal per-`mine*`-function append order (`analytics/diagnostics`) |
+| `diagnostics.Result.Strengths` / `Concerns` / `Opportunities` | Each filtered from the already-sorted `Findings` (or, for `salereadiness`-sourced Strengths/Opportunities, separately built and appended then independently re-sorted with the same `sortFindings` rule), so every one of the three preserves `Findings`' own `categoryOrder`/`Severity`/`FindingCode` ordering (`analytics/diagnostics`) |
+| `diagnostics.Coverage.MissingModules` / `Result.MissingDataAreas` | `Input`'s own field declaration order (metrics, ratios, QoE, working capital, cash flow, revenue quality, concentration, anomalies, variance, forecast, debt, covenants, benchmarks, value drivers, sale readiness) restricted to the modules with `WithX == false` (`analytics/diagnostics`) |
+| `diagnostics.Score.Components` | `categoryOrder`, restricted to categories backed by at least one available module — a category with zero available backing modules is excluded entirely, never included at the neutral baseline (`analytics/diagnostics`) |
 
 ## Error taxonomy
 
@@ -6246,6 +6393,17 @@ message strings:
   results was supplied) is a different problem domain from any analysis
   package's own input-validity problem, even though `management` reads
   most of those packages' `Result` types directly.
+- **`diagnostics.Issue{Code diagnostics.IssueCode, Severity, Message,
+  Module}`** — `analytics/diagnostics`' own separate system, but a
+  narrower one than `management.IssueCode`'s per-module-code approach: a
+  single `MODULE_UNAVAILABLE` code (plus `NO_INPUT_SUPPLIED` for the
+  degenerate zero-Input case) carries a `Module` field naming which of the
+  fifteen optional sibling modules the Issue concerns, rather than fifteen
+  separate `IssueXxxUnavailable` constants — a deliberate simplification
+  since every one of those fifteen Issues means exactly the same thing
+  ("this module was not supplied or was unavailable, narrowing which
+  Findings could be mined for it"), so a `Module` field discriminates as
+  precisely as a per-module code would without multiplying the taxonomy.
 
 Three structured-but-not-error-severity vocabularies exist alongside these
 and are not folded in, since they already serve the "stable, matchable"

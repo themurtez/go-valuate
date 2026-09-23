@@ -1,4 +1,4 @@
-Continue work in the standalone Go module:
+ Continue work in the standalone Go module:
 
 `github.com/themurtez/go-valuate`
 
