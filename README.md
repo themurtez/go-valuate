@@ -267,6 +267,7 @@ go-valuate/
   analytics/forecast/        deterministic financial projections and scenario sets from caller-supplied assumptions
   analytics/debt/            debt service coverage, leverage, and caller-defined debt capacity (DSCR, amortization, scenarios)
   analytics/covenants/       caller-supplied covenant rules vs. already-calculated metrics: pass/fail/unavailable, headroom, warning buffer
+  analytics/benchmarks/      caller-supplied company metrics vs. caller-supplied benchmark datasets: percentile/band placement, difference, favorable/unfavorable
   valuation/                 common valuation result envelope (value types, bridge, issues)
   valuation/sde/              SDE multiple method
   valuation/ebitda/           EBITDA multiple method
@@ -3720,6 +3721,140 @@ periods with a per-period summary breakdown, the equality operator's
 headroom-unavailable rule, no-mutation of caller-owned input, and
 JSON/determinism) exercised against hand-built fixtures.
 
+### `analytics/benchmarks`
+
+A deterministic **peer/industry benchmark comparison engine**: given a
+batch of caller-defined metric requests — each an ID, an already-
+calculated company value, an optional period, an optional favorable-
+direction hint, and a `BenchmarkSet` in whichever form the caller has
+available — this package compares every request independently and
+reports the benchmark's median and known range, an estimated percentile
+and quartile band for the company's value, the signed difference and
+relative difference against the median, a favorable/unfavorable
+classification (only where the caller supplies `Direction`), and every
+piece of provenance metadata the caller attached to the benchmark, plus
+an aggregate summary.
+
+**This package does not source, fetch, or redistribute benchmark data.**
+Every `BenchmarkSet` is supplied entirely by the caller, who is
+responsible for having the appropriate license to use whatever survey,
+association report, or peer dataset it derives from — this package only
+performs the comparison arithmetic and echoes back whatever provenance
+the caller attaches.
+
+Like `analytics/debt`/`analytics/variance`/`analytics/covenants`, this
+package is deliberately independent of `financial.FinancialDataset` — a
+company metric to benchmark is typically already computed upstream (via
+`financial/metrics`, `analytics/ratios`, `analytics/debt`, or any other
+caller-side calculation), and a benchmark dataset routinely comes from a
+source with no relationship to this repository's canonical taxonomy at
+all. `MetricRequest{CompanyValue, BenchmarkSet}` is the only required
+input shape.
+
+**Benchmark forms.** `BenchmarkForm` supports four shapes a caller might
+have on hand, from least to most granular: `MEDIAN` (only a single
+summary figure — no percentile or band is calculable, only difference/
+relative difference), `PERCENTILE_BANDS` (an arbitrary set of
+`(percentile, value)` points, linearly interpolated), `QUARTILES` (the
+common Q1/Median/Q3 special case, broken out as its own struct since most
+published industry reports present data this way), and
+`PEER_OBSERVATIONS` (explicit individual peer values — the richest form,
+since Calculate derives every other statistic, including an empirical
+rank-based percentile estimate, directly from the raw observations
+rather than trusting a pre-aggregated summary). Only the field(s)
+belonging to the declared `Form` are read; a caller populating an
+unrelated field has it silently ignored, never merged in as additional
+evidence.
+
+**Percentile/band math.** For `PERCENTILE_BANDS`/`QUARTILES`, Calculate
+sorts the supplied points by percentile and applies piecewise-linear
+interpolation both ways: `interpolate` (percentile -> value, used for the
+median and `BenchmarkRange`) and its inverse `percentileOfValue` (value ->
+percentile, used for the company's own `Percentile` and `Band`). A value
+below the lowest known point or above the highest is clamped to that
+point's own percentile (extrapolation is never attempted) but is still
+classified `BAND_BELOW_MIN`/`BAND_ABOVE_MAX` rather than merely the
+nearest quartile, so a caller can distinguish "at the edge of the known
+range" from "beyond it." For `PEER_OBSERVATIONS`, Calculate sorts the raw
+values and assigns each the percentile `100*i/(n-1)` (the same rank
+convention as Excel's `PERCENTILE.INC`/the "R-7" method), then applies
+the identical interpolation logic — so every `BenchmarkForm` shares one
+comparison code path.
+
+**Monotonicity precondition.** Every percentile-band/quartile table is
+required to have `Value` non-decreasing as `Percentile` increases (true
+by construction for peer observations, since Calculate itself sorts by
+value to build them — but not guaranteed for a caller-supplied
+`PercentileBands`/`Quartiles` table, e.g. one entered in descending order
+for a "lower is better" metric like DSO). A caller expresses "lower is
+better" via `Direction`, never via point order. A table that violates
+this produces `IssueNonMonotonicBenchmarkPoints` and leaves
+`Percentile`/`Band`/`BenchmarkRange` unavailable for that metric — this
+package never reports an inverted range or a band computed from a
+self-contradictory table. `BenchmarkMedian` and the difference/relative-
+difference/favorable fields are unaffected when they rest on an
+explicitly supplied `Median`/`Quartiles.Median`, since those don't depend
+on the points table's ordering.
+
+**Favorable/unfavorable, caller-defined only.** `Direction`
+(`HIGHER_IS_BETTER`/`LOWER_IS_BETTER`/`NEUTRAL`/unspecified) is entirely
+at the caller's discretion — this package has no built-in opinion on
+whether any given metric is better higher or lower, and `Favorable` is
+always `NOT_APPLICABLE` when `Direction` is left unspecified or set to
+`NEUTRAL`.
+
+**Availability, not silence.** A missing `MetricID` produces an entirely
+unavailable `Comparison`. An unavailable `CompanyValue`, an invalid or
+unrecognized `Form`, missing benchmark data, an insufficient (fewer than
+two distinct) percentile-point count, or a non-monotonic points table
+each leave only the affected fields unavailable — plus a structured
+`Issue` — rather than discarding the whole comparison; every input row is
+always reflected in `Result.Comparisons`.
+
+**Provenance.** `BenchmarkSource` (name, effective date, population/
+segment, sample size, and an optional license/source ID) plus
+`IndustryLabel`/`SizeLabel`/`GeographyLabel` are recorded verbatim on
+every `Comparison` — this package never fetches, validates, or infers any
+of these fields.
+
+**Summary.** `Summary` tallies `FavorableCount`/`UnfavorableCount`/
+`UnavailableCount` plus `UnfavorableMetricIDs` for direct display.
+
+Files:
+
+- **`types.go`** — `Value`, `Direction`, `BenchmarkForm`,
+  `PercentilePoint`, `Quartiles`, `PeerObservation`, `BenchmarkSource`,
+  `BenchmarkSet`, `MetricRequest`, `Input`,
+  `IssueCode`/`IssueSeverity`/`Issue`, `HasErrors`, `Band`, `Favorable`,
+  `Range`, `Comparison`, `Summary`, `Result`, `FormulaVersion`.
+- **`percentile.go`** — `deriveBenchmarkStats`: per-`BenchmarkForm`
+  normalization into a common `benchmarkStats` shape, the
+  `dedupSortPoints`/`isNonDecreasing` point-table helpers, the
+  peer-observation rank-based `peerPercentilePoints` deriver, and the
+  bidirectional `interpolate`/`percentileOfValue` piecewise-linear
+  functions.
+- **`evaluate.go`** — `evaluateMetric`: per-metric validation, benchmark
+  median/range/percentile/band derivation, difference/relative-difference,
+  and favorable/unfavorable classification.
+- **`benchmarks.go`** — `Calculate(Input) Result`: top-level
+  orchestration, duplicate-metric-ID detection, and `Summary` aggregation.
+
+See [`analytics/benchmarks/benchmarks_test.go`](analytics/benchmarks/benchmarks_test.go),
+[`analytics/benchmarks/determinism_test.go`](analytics/benchmarks/determinism_test.go),
+and [`analytics/benchmarks/roundtrip_test.go`](analytics/benchmarks/roundtrip_test.go)
+for every scenario the task requires (all four benchmark forms, linear
+interpolation and its inverse, an out-of-range company value clamped but
+distinguished as below-min/above-max, sparse quartile data with only one
+or two of the three points known, unsorted peer observations, a single
+peer observation, an explicit median overriding a derived one, a
+non-monotonic points table for both `PERCENTILE_BANDS` and `QUARTILES`,
+an unavailable company value, a missing metric ID, an invalid/unrecognized
+form, missing benchmark data, a zero benchmark median's division-by-zero
+guard, both favorable directions plus neutral/unspecified, duplicate
+metric IDs, summary aggregation, no-mutation of caller-owned input,
+provenance round-tripping, and JSON/determinism) exercised against
+hand-built fixtures.
+
 ### `valuation`
 
 Implements the individual valuation methods themselves: SDE multiple,
@@ -4897,6 +5032,7 @@ persist historical valuations").
 | Forecast/scenario formulas | `forecast.FormulaVersion`, echoed on `forecast.Result.FormulaVersion` | The historical-base derivation, the per-period compounding rule for revenue/COGS/opex (aggregate-plus-override precedence, the `FixedAmount` proportional-split rule, `OpexMethodExcludeAmount`'s one-time-item exclusion), the EBIT/EBITDA/SDE/margin/tax/net-income formulas, the working-capital and cash-flow bridge, the debt-service-coverage formula, and every `Apply*` scenario-transformation helper's exact arithmetic (`analytics/forecast`) |
 | Debt capacity/DSCR formulas | `debt.FormulaVersion`, echoed on `debt.Result.FormulaVersion` | The amortization/payment formula (including interest-only handling), the annual-debt-service aggregation, the DSCR/fixed-charge-coverage/leverage/interest-coverage formulas, the maximum-debt-under-DSCR and maximum-debt-under-leverage solvers, the combined-capacity (most-restrictive-constraint) rule, and the downside-scenario methodology (`analytics/debt`) |
 | Covenant evaluation formulas | `covenants.FormulaVersion`, echoed on `covenants.Result.FormulaVersion` | The operator-evaluation rule, the direction-aware headroom formula, the pass/fail/unavailable classification, and the warning-buffer (near-breach) classification (`analytics/covenants`) |
+| Benchmark comparison formulas | `benchmarks.FormulaVersion`, echoed on `benchmarks.Result.FormulaVersion` | The percentile-band/quartile linear-interpolation rule, the peer-observation rank-based percentile estimate, the non-decreasing-value precondition and its `IssueNonMonotonicBenchmarkPoints` guard, the band-placement rule, the difference/relative-difference formulas, and the favorable/unfavorable classification rule (`analytics/benchmarks`) |
 | AI request/response schema | `ai.RequestSchemaVersion`, echoed on `ai.Provenance.RequestSchemaVersion` | The `Request`/`Response` wire shape `financial/classification/ai` sends to/expects from a `Classifier` |
 | AI fallback orchestration | `ai.OrchestrationVersion`, echoed on `ai.Provenance.OrchestrationVersion` | The trigger/fallback/safety decision logic in `ClassifyWithFallback`/`ClassifyBatchWithFallback` (which `FallbackMode` runs AI when, structural-row skipping, disagreement handling) |
 | OpenAI adapter (classification) | `openai.AdapterVersion`, echoed on `ai.Provenance.AdapterVersion` | This specific provider adapter's prompt-construction/response-parsing logic (`financial/classification/ai/openai`) |
