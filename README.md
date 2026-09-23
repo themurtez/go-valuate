@@ -269,6 +269,7 @@ go-valuate/
   analytics/covenants/       caller-supplied covenant rules vs. already-calculated metrics: pass/fail/unavailable, headroom, warning buffer
   analytics/benchmarks/      caller-supplied company metrics vs. caller-supplied benchmark datasets: percentile/band placement, difference, favorable/unfavorable
   analytics/valuedrivers/    deterministic driver/scenario sensitivity: re-runs orchestrator+consensus under caller-defined metric/assumption changes, one-factor-at-a-time and combined
+  analytics/consolidation/  multi-entity consolidation: caller-driven ownership weighting, explicit FX conversion and intercompany eliminations, period-alignment/reconciliation issues, produces a consolidated financial.FinancialDataset
   transactions/acquisition/ acquisition screening: price multiples, consensus premium/discount, financing/DSCR (via analytics/debt), returns, scenarios, caller-defined red flags
   transactions/dealstructure/ acquisition financing structure: sources and uses, debt tranches/seller note (own amortization engine incl. balloons), earnout schedule, funding gap/surplus
   transactions/salereadiness/ deterministic sale-readiness assessment: 11 dimension statuses from optional QoE/working-capital/concentration/revenue-quality/consensus/metrics results plus a business profile, blockers/risks/strengths/missing-information/opportunities, optional overall score
@@ -4808,6 +4809,176 @@ compounds differently from the naive sum of its one-factor-at-a-time
 parts, no-mutation-of-caller-input including `Applicability`, and full
 JSON round-trip/determinism coverage).
 
+### `analytics/consolidation`
+
+A deterministic **multi-entity financial consolidation** engine: given
+multiple entities' own `financial.FinancialDataset`s plus caller-supplied
+ownership/currency/elimination information, `Calculate` combines them into
+a single consolidated `financial.FinancialDataset` — one `NormalizedItem`
+per `(Code, Period)`, with `Sources` linking every consolidated figure back
+to the entities that contributed to it — plus a full audit trail of what
+was combined, converted, and eliminated along the way.
+
+**The one analytics package whose primary output is itself a
+`financial.FinancialDataset`.** Every sibling `analytics/` package reads a
+dataset; this one produces one, using `financial.FinancialDataset`'s own
+existing shape and provenance mechanism (`NormalizedItem.Sources`) rather
+than inventing a parallel one — so `Result.Consolidated` can be fed
+straight into any other package in this repository (`financial/metrics`,
+`analytics/qoe`, `valuation/orchestrator`, ...) exactly as it would a
+single entity's own dataset.
+
+**Three things this package deliberately never does**, each directly from
+its own prompt brief:
+
+- **It never fetches FX rates.** `Input.CurrencyRates` is the complete,
+  explicit set of `(FromCurrency, ToCurrency, Period, Rate)` conversions
+  `Calculate` is allowed to use. A currency mismatch with no matching rate
+  produces `IssueMissingCurrencyRate`, and that entity's items for the
+  affected period are excluded from the consolidated total — never
+  assumed to convert 1:1.
+- **It never infers intercompany eliminations.** `Input.Eliminations` is
+  the complete, explicit list of what to remove, keyed by
+  `(EntityID, Code, Period, Amount)`. `Calculate` performs no analysis to
+  detect an intercompany relationship on its own — it never assumes two
+  entities' matching revenue/expense codes in the same period are
+  intercompany trade, since that judgment requires visibility into the
+  caller's own corporate structure this package cannot infer from amounts
+  alone.
+- **It never guesses which periods are "common."** `Input.Periods` is the
+  caller-selected, explicit set of reporting periods to consolidate. Two
+  entities' same-looking `financial.Period` string (e.g. `"2025"`) is a
+  caller convention this package cannot verify actually denotes the same
+  fiscal period without being told so explicitly — mirroring
+  `analytics/workingcapital.Input.PeriodMeta`'s and every other analytics
+  sibling's identical "no guessing chronology/period identity" rule,
+  applied here to period *selection* rather than *ordering*.
+
+#### Full vs. ownership-weighted consolidation
+
+```go
+type Mode string
+
+const (
+    ModeFullConsolidation Mode = "full_consolidation"
+    ModeOwnershipWeighted Mode = "ownership_weighted"
+)
+```
+
+The zero `Mode` resolves to `ModeFullConsolidation` — the standard
+majority/controlling-interest accounting convention: every selected
+entity's full amount is summed at every `(Code, Period)`, independent of
+`EntityDataset.OwnershipPercent`. A caller cannot accidentally
+under-consolidate a majority-owned subsidiary by forgetting to set
+`OwnershipPercent`; supplying it is always harmless under this mode. Under
+`ModeOwnershipWeighted` — which must be explicitly selected, per the task
+brief ("simple ownership-weighted mode if explicitly selected") — every
+converted amount is multiplied by `OwnershipPercent` before summing.
+`OwnershipPercent` is required (non-nil, finite, in `[0, 1]`) for every
+selected entity under this mode; an entity missing or failing that check
+is excluded from consolidation entirely
+(`IssueMissingOwnershipPercent`/`IssueInvalidOwnershipPercent`) rather than
+treated as 0% or 100% owned.
+
+#### Order of operations: eliminate, then convert, then weight
+
+For each selected entity's item at `(Code, Period)`:
+
+```
+1. RawAmount       = item.Amount - sum(matching Eliminations), in the entity's native currency
+2. ConvertedAmount = RawAmount * matching CurrencyRate (or RawAmount unchanged, if no conversion needed)
+3. WeightedAmount  = ConvertedAmount * ownership weight (1.0 under ModeFullConsolidation)
+```
+
+`WeightedAmount` is what is actually summed into `Result.Consolidated`.
+Eliminations apply first and in the entity's native currency —
+`Elimination.Amount` is "removed before any currency conversion," mirroring
+how a real consolidation nets out intercompany balances before translating
+the net figure. An elimination can drive a contribution negative; this is
+preserved rather than clamped to zero, since clamping would silently
+understate the elimination. `EntityCodeContribution` (on each
+`EntityContribution.Items` entry) exposes all three figures so a caller can
+audit exactly what happened to a given line.
+
+#### Target currency resolution
+
+`Policy.TargetCurrency`, if set, is used as-is. If left empty, every
+selected entity must share exactly one non-empty currency, which is then
+used with no conversion attempted. Resolution fails
+(`Result.Available == false`, `IssueMissingTargetCurrency`) — never
+silently returning an empty string, since
+`financial.FinancialDataset.Currency` is "required and never empty" — if
+selected entities report more than one currency, or if no selected entity
+has a non-empty currency at all, and `Policy.TargetCurrency` was not
+supplied to resolve the ambiguity.
+
+#### Reconciliation issues
+
+`Calculate` never returns a Go `error`; every input or consistency problem
+is a structured `Issue{Code, Severity, EntityID, Period, Message}` in
+`Result.ReconciliationIssues` (split into `Warnings`/`Errors` by
+`Severity`, for a caller that wants only one or the other) — the same
+two-severity model every analytics sibling package uses, applied here to
+consolidation-specific problems: an unknown/unselected/duplicate entity, a
+missing or out-of-range ownership percentage, a missing or invalid
+currency rate, an elimination targeting an unknown entity, an unselected
+entity, an out-of-scope period, or a `(Code, Period)` with no matching
+item, and a period in `Input.Periods` an entity has no data for at all
+(`IssuePeriodMissingForEntity` — advisory only: that entity simply
+contributes nothing for that period, mirroring every analytics sibling
+package's "missing is not zero" availability discipline applied here at
+the entity/period level).
+
+#### What `Result` contains
+
+| Field | What it is |
+|---|---|
+| `Consolidated` | The combined `financial.FinancialDataset`: one `NormalizedItem` per `(Code, Period)` across every selected entity's `WeightedAmount` contributions, with `Sources` carrying one `financial.SourceRef` per contributing entity (`RowID` is the `EntityID`, `Label` is the `EntityLabel`, `Amount` is that entity's `WeightedAmount`) — the provenance link back to source entities the task brief requires, expressed through `financial.FinancialDataset`'s own existing mechanism. |
+| `EntityContributions` | One `EntityContribution` per selected entity that contributed at least one item: its currency, resolved `Mode`, `OwnershipPercent`, every `EntityCodeContribution` it contributed, and its `TotalWeightedContribution`. |
+| `EliminationsApplied` | Every `Input.Eliminations` entry naming a known, selected entity (even one that turned out to target an out-of-scope period or a nonexistent line item — see the reconciliation-issues list above for those advisory flags). |
+| `CurrencyConversions` | One entry per distinct `(EntityID, FromCurrency, ToCurrency, Period)` conversion actually applied, with the effective `Rate` used. |
+| `ReconciliationIssues` / `Warnings` / `Errors` | Every input/consistency problem found — see above. |
+
+Files:
+
+- **`types.go`** — `Mode`, `EntityDataset`, `CurrencyRate`, `Elimination`,
+  `Policy`/`resolvePolicy`/`resolveMode`, `Input`,
+  `IssueSeverity`/`IssueCode`/`Issue`/`HasErrors`,
+  `EntityCodeContribution`, `EntityContribution`, `CurrencyConversion`,
+  `Result`, `FormulaVersion`.
+- **`eliminations.go`** — `resolveEliminations`/`hasMatchingItem`: matches
+  `Input.Eliminations` against known/selected entities and their actual
+  line items, and builds the `elimKey -> amount` lookup
+  `buildEntityContributions` subtracts.
+- **`currency.go`** — `buildRateIndex`: validates `Input.CurrencyRates`
+  and builds the `(FromCurrency, ToCurrency, Period) -> Rate` lookup.
+- **`periods.go`** — `validatePeriodCoverage`: the period-alignment
+  validation the task brief requires.
+- **`contributions.go`** — `buildEntityContributions` (the eliminate ->
+  convert -> weight pipeline per entity), `resolveOwnershipWeight`,
+  `buildConsolidatedDataset` (the final per-`(Code, Period)` summation
+  into a `financial.FinancialDataset`).
+- **`consolidation.go`** — `Calculate(Input) Result`: input-availability
+  checks (no entities, no periods, duplicate `EntityID`), entity
+  selection, target-currency resolution, and orchestration of the helpers
+  above.
+
+See [`analytics/consolidation/consolidation_test.go`](analytics/consolidation/consolidation_test.go),
+[`analytics/consolidation/determinism_test.go`](analytics/consolidation/determinism_test.go),
+and [`analytics/consolidation/roundtrip_test.go`](analytics/consolidation/roundtrip_test.go)
+for every case the task requires (two entities, eliminations on both sides
+of an intercompany fee, an elimination targeting an unknown entity/an
+out-of-scope period/a nonexistent line item, entities reporting different
+period coverage, entities in different currencies with and without a
+matching rate, ambiguous multi-currency input with no `TargetCurrency`,
+explicit ownership weighting alongside a missing/invalid ownership
+percentage, full consolidation deliberately ignoring `OwnershipPercent`,
+every unavailable-input case (no entities, no periods, duplicate
+`EntityID`, no resolvable currency), `Policy.SelectedEntityIDs` narrowing
+and an unknown ID within it, no-mutation-of-caller-input, and full JSON
+round-trip/determinism coverage including a map-order stress test across
+15 entities/3 currencies/8 codes/3 periods).
+
 ### `transactions/acquisition`
 
 A deterministic **acquisition screening** calculator: given a target
@@ -5495,6 +5666,7 @@ persist historical valuations").
 | Covenant evaluation formulas | `covenants.FormulaVersion`, echoed on `covenants.Result.FormulaVersion` | The operator-evaluation rule, the direction-aware headroom formula, the pass/fail/unavailable classification, and the warning-buffer (near-breach) classification (`analytics/covenants`) |
 | Benchmark comparison formulas | `benchmarks.FormulaVersion`, echoed on `benchmarks.Result.FormulaVersion` | The percentile-band/quartile linear-interpolation rule, the peer-observation rank-based percentile estimate, the non-decreasing-value precondition and its `IssueNonMonotonicBenchmarkPoints` guard, the band-placement rule, the difference/relative-difference formulas, and the favorable/unfavorable classification rule (`analytics/benchmarks`) |
 | Value driver/scenario formulas | `valuedrivers.FormulaVersion`, echoed on `valuedrivers.Result.FormulaVersion` | Every `DriverType`'s exact per-method mutation rule (which `Input` field(s) it changes and how), the `LinkageApplied`/`LinkageNotApplicable`/`LinkageMethodExcluded` classification, the one-factor-at-a-time vs. combined-scenario compounding order, and the value/percent-delta formulas (`analytics/valuedrivers`) |
+| Multi-entity consolidation formulas | `consolidation.FormulaVersion`, echoed on `consolidation.Result.FormulaVersion` | The full/ownership-weighted consolidation formulas, the eliminate-then-convert-then-weight order of operations, the target-currency resolution rule, and every reconciliation-`Issue` trigger (`analytics/consolidation`) |
 | Acquisition screening formulas | `acquisition.FormulaVersion`, echoed on `acquisition.Result.FormulaVersion` | The price-to-revenue/EBITDA/SDE multiple formulas, the premium/discount-to-consensus formula, the sources-and-uses/required-equity arithmetic, the annual-debt-service/DSCR/post-debt-cash-flow formulas (via `analytics/debt.Amortize`), the cash-on-cash-return/simple-payback-period formulas, the leverage formula, the downside/upside scenario methodology, and the red-flag threshold rules (`transactions/acquisition`) |
 | Deal-structure/financing formulas | `dealstructure.FormulaVersion`, echoed on `dealstructure.Result.FormulaVersion` | The sources-and-uses/required-equity/funding-gap arithmetic, this package's own per-tranche amortization formula (including interest-only handling and balloon-payment sizing — distinct from `analytics/debt.Amortize`'s formula), the seller-note and earnout schedule derivations, the financing-percentage formula, and the annual-debt-service aggregation across tranches (`transactions/dealstructure`) |
 | Sale-readiness assessment formulas | `salereadiness.FormulaVersion`, echoed on `salereadiness.Result.FormulaVersion` | Every `DimensionCode`'s classification rule and Policy-threshold comparison (`dimensions.go`), the Blocker/Risk/Strength/MissingInformation/Opportunity derivation rules including `blockingDimensions` and `negativeEarningsBlocker` (`findings.go`) (`transactions/salereadiness`) |
@@ -5574,6 +5746,13 @@ unverified incidental property of the standard library).
 | `salereadiness.Result.Dimensions` | Fixed `dimensionOrder` (financial record quality, earnings stability, normalization burden, customer concentration, recurring revenue, owner dependence, margin trend, working-capital stability, debt/leverage, data completeness, valuation-method consensus) — always all 11 entries in this order whenever `Available` is true, one per `DimensionCode`, regardless of how many were actually assessed (`transactions/salereadiness`) |
 | `salereadiness.Result.Blockers` / `Risks` / `Strengths` / `MissingInformation` / `Opportunities` | Each in `dimensionOrder` (the same fixed order `Dimensions` is in), since `buildFindings` ranges over `dims` once; `negativeEarningsBlocker`'s structural Blocker (when triggered) is prepended ahead of every dimension-derived Blocker (`transactions/salereadiness`) |
 | `salereadiness.Score.Components` | Same `dimensionOrder` as `Result.Dimensions`, one entry per assessed (non-`StatusUnassessed`) dimension, `StatusUnassessed` entries omitted entirely (`transactions/salereadiness`) |
+| `consolidation.Result.Consolidated.Items` | Sorted by `Code`, then by `Period` — the same order `financial.Normalize` produces, since `buildConsolidatedDataset` uses the identical sort (`analytics/consolidation`) |
+| `consolidation.Result.Consolidated.Items[i].Sources` | Sorted by `RowID` (the contributing `EntityID`) ascending |
+| `consolidation.Result.EntityContributions` | Sorted by `EntityID` ascending |
+| `consolidation.EntityContribution.Items` | Sorted by `Code`, then by `Period` |
+| `consolidation.Result.EliminationsApplied` | Sorted by `EntityID`, then `Code`, then `Period` |
+| `consolidation.Result.CurrencyConversions` | Sorted by `EntityID`, then `Period` |
+| `consolidation.Result.ReconciliationIssues` / `Warnings` / `Errors` | Sorted by `EntityID`, then `Period` — a real `sort.SliceStable`, never left to `Calculate`'s internal per-check append order (`analytics/consolidation`) |
 
 ## Error taxonomy
 
@@ -5794,6 +5973,23 @@ message strings:
   quality-signal split — except `Status` classifies a dimension
   (analogous to `workingcapital.TrendDirection`) rather than firing a
   discrete flag.
+- **`consolidation.Issue{Code consolidation.IssueCode, Severity, EntityID,
+  Period, Message}`** — `analytics/consolidation`'s own separate system
+  (`NO_ENTITIES`, `NO_PERIODS`, `DUPLICATE_ENTITY_ID`,
+  `UNKNOWN_SELECTED_ENTITY`, `MISSING_OWNERSHIP_PERCENT`,
+  `INVALID_OWNERSHIP_PERCENT`, `MISSING_TARGET_CURRENCY`,
+  `MISSING_CURRENCY_RATE`, `INVALID_CURRENCY_RATE`,
+  `UNKNOWN_ELIMINATION_ENTITY`, `ELIMINATION_ENTITY_NOT_SELECTED`,
+  `ELIMINATION_PERIOD_OUT_OF_SCOPE`, `ELIMINATION_TARGET_NOT_FOUND`,
+  `PERIOD_MISSING_FOR_ENTITY`, `ENTITY_CURRENCY_EMPTY`), its own problem
+  domain for the same reason as every sibling above: a consolidation
+  input/reconciliation problem (an unresolvable target currency, a stale
+  elimination, a gap in period coverage) doesn't overlap with any existing
+  system, even though this package reads several entities'
+  `financial.FinancialDataset`s directly. The one addition beyond every
+  prior `Issue` shape: `EntityID` and `Period` fields alongside `Code`,
+  since a consolidation problem is almost always scoped to one specific
+  entity and/or period rather than the calculation as a whole.
 
 Three structured-but-not-error-severity vocabularies exist alongside these
 and are not folded in, since they already serve the "stable, matchable"
