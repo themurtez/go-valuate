@@ -269,6 +269,7 @@ go-valuate/
   analytics/covenants/       caller-supplied covenant rules vs. already-calculated metrics: pass/fail/unavailable, headroom, warning buffer
   analytics/benchmarks/      caller-supplied company metrics vs. caller-supplied benchmark datasets: percentile/band placement, difference, favorable/unfavorable
   analytics/valuedrivers/    deterministic driver/scenario sensitivity: re-runs orchestrator+consensus under caller-defined metric/assumption changes, one-factor-at-a-time and combined
+  transactions/acquisition/ acquisition screening: price multiples, consensus premium/discount, financing/DSCR (via analytics/debt), returns, scenarios, caller-defined red flags
   valuation/                 common valuation result envelope (value types, bridge, issues)
   valuation/sde/              SDE multiple method
   valuation/ebitda/           EBITDA multiple method
@@ -4805,6 +4806,119 @@ compounds differently from the naive sum of its one-factor-at-a-time
 parts, no-mutation-of-caller-input including `Applicability`, and full
 JSON round-trip/determinism coverage).
 
+### `transactions/acquisition`
+
+A deterministic **acquisition screening** calculator: given a target
+business's headline financials (revenue, normalized EBITDA/SDE), an
+already-computed consensus valuation, an asking price, financing/deal-
+structure assumptions, and optional fees/working-capital/capex/buyer-
+compensation inputs, this package derives the price-multiple, financing,
+coverage, and buyer-return arithmetic a buyer or advisor runs to screen a
+prospective deal — **decision-support, not investment advice**. It
+computes no score, no composite rating, and no buy/don't-buy verdict;
+every figure is neutral arithmetic or a caller-defined threshold
+comparison (see `RedFlagThresholds`).
+
+**Dataset-independent, like `analytics/debt`/`analytics/covenants`.**
+This package has no dependency on `financial.FinancialDataset` — a
+target's `NormalizedEBITDA`/`NormalizedSDE` is expected to already be
+computed upstream via `financial/metrics` and `financial/adjustments` (or
+supplied from a broker/CIM), and `Consensus.Value` is expected to be
+`valuation/consensus.Result.Statistics.WeightedMean` or `.SimpleMean` on
+whatever basis the caller's `AskingPrice` is also expressed on. This
+package performs no basis conversion itself (see `valuation/basis` for
+that) and assumes the two are already comparable.
+
+**Financing reuses `analytics/debt` directly**, rather than
+reimplementing amortization math: `Input.Financing.DebtTranches` is a
+`[]debt.LoanTerms`, one entry per funding tranche (a bank acquisition term
+loan, a seller note, or both — an all-cash deal simply supplies none), and
+`Calculate` derives each tranche's annual debt service via
+`debt.Amortize` exactly as a caller building the same analysis directly
+would. `Result.DebtSchedules` echoes each valid tranche's
+`debt.AmortizationSchedule`.
+
+**Earnings-base fallback.** Every earnings-based figure (price/EBITDA,
+DSCR, leverage) prefers `Target.NormalizedEBITDA` and falls back to
+`Target.NormalizedSDE` when EBITDA is unavailable — mirroring
+`debt.CoverageResult.NumeratorSource`'s cash-flow/EBITDA fallback
+pattern — and reports which source was used via
+`CoverageResult.EarningsBaseSource`.
+
+**Neutral premium/discount arithmetic.** `Result.Consensus.Premium`/
+`PremiumPercent` is `AskingPrice - ConsensusValue` (signed): positive
+means above consensus, negative means below. Neither direction is labeled
+favorable or unfavorable, and
+`RedFlagThresholds.MaximumPremiumToConsensusPercent` never triggers on a
+discount regardless of magnitude — only a premium above the threshold
+does.
+
+**Availability, not silence.** A zero-debt (all-cash) deal reports a
+known `AnnualDebtService`/`Leverage` of exactly 0 (not unavailable) — "no
+debt" is a known figure of zero, not a missing one — while `DSCR` is left
+unavailable (coverage of zero debt service is not a meaningful ratio),
+mirroring `debt.CoverageResult.DSCR`'s identical convention. An invalid
+debt tranche (negative principal/rate, non-positive amortization years,
+an unrecognized frequency, or an interest-only period at least as long as
+the amortization period) is excluded from every downstream calculation
+and reported as a `SeverityError` `Issue`, never silently ignored or
+amortized anyway.
+
+**Scenarios.** `Input.Scenarios` is zero or more caller-defined
+`ScenarioAdjustment` haircuts (revenue/EBITDA/SDE, independently, negative
+values modeling an upside case), evaluated with `AskingPrice`, financing
+terms, and fees held fixed — a scenario stresses the target's financial
+performance, not the deal structure — mirroring
+`debt.DownsideScenario`'s identical haircut convention exactly.
+
+**Red flags are caller-driven only.** `RedFlagThresholds` defines no
+default thresholds; each of its seven fields independently gates its own
+flag check (DSCR, price/EBITDA, price/SDE, premium-to-consensus,
+cash-on-cash return, payback period, leverage), and a zero-value
+`RedFlagThresholds` skips every threshold check (recorded as advisory
+`IssueNoRedFlagThresholds`) — mirroring `analytics/debt.LenderPolicy` and
+`analytics/covenants`' fully caller-driven threshold model.
+`FlagNegativePostDebtCashFlow` is the one flag that requires no threshold,
+since a deal not cash-flowing at the base case is worth surfacing
+unconditionally.
+
+Files:
+
+- **`types.go`** — `Value`/`Unavailable`/`AvailableValue`,
+  `TargetFinancials`, `ConsensusValuation`, `TransactionFees`,
+  `Financing`, `WorkingCapitalRequirement`, `CapexAssumption`,
+  `BuyerCompensationAssumption`, `ScenarioAdjustment`,
+  `RedFlagThresholds`, `Input`, `IssueCode`/`IssueSeverity`/`Issue`/
+  `HasErrors`, `EarningsBaseSource`, `PriceMultiples`,
+  `ConsensusComparison`, `SourcesAndUses`, `CoverageResult`,
+  `ReturnMetrics`, `ScenarioResult`, `FlagCode`/`FlagSeverity`/`Flag`,
+  `Result`, `FormulaVersion`.
+- **`acquisition.go`** — `Calculate(Input) Result`: debt-tranche
+  validation/amortization (via `analytics/debt`), base-case orchestration,
+  and every `resolve*`/`sum*` helper.
+- **`pricing.go`** — `computeMultiples`, `computeConsensusComparison`,
+  `computeSourcesAndUses`, `resolveEarningsBase`, `computeCoverage`,
+  `computeReturns`: the price-multiple, premium/discount, sources-and-
+  uses, DSCR/leverage/post-debt-cash-flow, and cash-on-cash-return/
+  payback-period formulas.
+- **`scenarios.go`** — `computeScenarios`/`applyHaircut`: the downside/
+  upside scenario engine, re-running `pricing.go`'s formulas against
+  haircut earnings with financing held fixed.
+- **`flags.go`** — `buildFlags` and one `*Flag` function per
+  `RedFlagThresholds` field, plus the two unconditional/scenario-driven
+  flags.
+
+See [`transactions/acquisition/acquisition_test.go`](transactions/acquisition/acquisition_test.go),
+[`transactions/acquisition/determinism_test.go`](transactions/acquisition/determinism_test.go),
+and [`transactions/acquisition/roundtrip_test.go`](transactions/acquisition/roundtrip_test.go)
+for every case the task requires (an all-cash deal, a leveraged deal, a
+seller-note-plus-bank-debt deal, an asking price above and below
+consensus value, a weak-DSCR deal, a deal with negative post-debt cash
+flow, downside/upside scenario shocks, SDE fallback, capex/buyer-
+compensation deductions, an invalid debt tranche, the degenerate empty-
+input case, no-mutation-of-caller-input, and full JSON round-trip/
+determinism coverage).
+
 ### `valuation/e2e`
 
 Not a reusable package — a single end-to-end deterministic fixture test
@@ -5135,6 +5249,7 @@ persist historical valuations").
 | Covenant evaluation formulas | `covenants.FormulaVersion`, echoed on `covenants.Result.FormulaVersion` | The operator-evaluation rule, the direction-aware headroom formula, the pass/fail/unavailable classification, and the warning-buffer (near-breach) classification (`analytics/covenants`) |
 | Benchmark comparison formulas | `benchmarks.FormulaVersion`, echoed on `benchmarks.Result.FormulaVersion` | The percentile-band/quartile linear-interpolation rule, the peer-observation rank-based percentile estimate, the non-decreasing-value precondition and its `IssueNonMonotonicBenchmarkPoints` guard, the band-placement rule, the difference/relative-difference formulas, and the favorable/unfavorable classification rule (`analytics/benchmarks`) |
 | Value driver/scenario formulas | `valuedrivers.FormulaVersion`, echoed on `valuedrivers.Result.FormulaVersion` | Every `DriverType`'s exact per-method mutation rule (which `Input` field(s) it changes and how), the `LinkageApplied`/`LinkageNotApplicable`/`LinkageMethodExcluded` classification, the one-factor-at-a-time vs. combined-scenario compounding order, and the value/percent-delta formulas (`analytics/valuedrivers`) |
+| Acquisition screening formulas | `acquisition.FormulaVersion`, echoed on `acquisition.Result.FormulaVersion` | The price-to-revenue/EBITDA/SDE multiple formulas, the premium/discount-to-consensus formula, the sources-and-uses/required-equity arithmetic, the annual-debt-service/DSCR/post-debt-cash-flow formulas (via `analytics/debt.Amortize`), the cash-on-cash-return/simple-payback-period formulas, the leverage formula, the downside/upside scenario methodology, and the red-flag threshold rules (`transactions/acquisition`) |
 | AI request/response schema | `ai.RequestSchemaVersion`, echoed on `ai.Provenance.RequestSchemaVersion` | The `Request`/`Response` wire shape `financial/classification/ai` sends to/expects from a `Classifier` |
 | AI fallback orchestration | `ai.OrchestrationVersion`, echoed on `ai.Provenance.OrchestrationVersion` | The trigger/fallback/safety decision logic in `ClassifyWithFallback`/`ClassifyBatchWithFallback` (which `FallbackMode` runs AI when, structural-row skipping, disagreement handling) |
 | OpenAI adapter (classification) | `openai.AdapterVersion`, echoed on `ai.Provenance.AdapterVersion` | This specific provider adapter's prompt-construction/response-parsing logic (`financial/classification/ai/openai`) |
