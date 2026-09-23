@@ -246,6 +246,7 @@ packages defined here — see
 go-valuate/
   accounting/ledger/         general ledger / trial balance domain engine: chart of accounts, journal entries, balances, trial balance (built or imported), hierarchy rollups — independent of financial.Code (see docs/LEDGER.md)
   accounting/statements/     deterministic ledger-to-FinancialDataset bridge: account mapping (explicit/deterministic-suggestion/unmapped, account-type safety, sign normalization/contra accounts), income statement/balance sheet construction, mapping coverage/materiality, balance-sheet reconciliation — the ledger -> statements -> financial dependency boundary (see docs/STATEMENT_BUILDER.md)
+  accounting/ar/             deterministic AR aging/collections analytics: portable open-receivables model (independent of accounting/ledger), due-date/invoice-date bucket aging, customer-level summaries, DSO, historical migration/trend, collection metrics, concentration (reuses analytics/concentration), deterministic collection-priority heuristic, GL control-account reconciliation (see docs/AR_AGING.md)
   ingestion/                 CSV/XLSX/PDF bytes -> raw tabular rows (no classification)
   ingestion/csv/              CSV parser (encoding/csv, zero external dependencies)
   ingestion/xlsx/              XLSX parser (github.com/xuri/excelize/v2)
@@ -6063,6 +6064,8 @@ persist historical valuations").
 | Statement builder result/schema | `statements.SchemaVersion`, echoed on `Result.SchemaVersion` | The `AccountMapping`/`Statement`/`Section`/`Row`/`Result`/`Issue` shapes (`accounting/statements`); see `docs/STATEMENT_BUILDER.md` |
 | Statement builder formulas | `statements.StatementFormulaVersion`, echoed on `Result.StatementFormulaVersion` | Sign normalization (`signs.go`), structural-row/section-template assembly (`income.go`/`balance.go`), hierarchy leaf-posting policy — versioned separately from `SchemaVersion` since the calculation semantics can change independently of the result shape (`accounting/statements`) |
 | Statement builder mapping contract | `statements.MappingContractVersion`, echoed on `Result.MappingContractVersion` | `AccountMapping`'s shape, mapping precedence (explicit > deterministic suggestion > unmapped), account-type safety rules (`accounttype.go`), `MappingTemplate` rule precedence (`templates.go`) — versioned separately since a mapping-precedence change does not necessarily imply a statement-formula change (`accounting/statements`) |
+| AR aging schema | `ar.SchemaVersion`, echoed on `Result.SchemaVersion` | The `Receivable`/`Payment`/`BucketDefinition`/`CustomerSummary`/`Result`/`Issue` shapes (`accounting/ar`); see `docs/AR_AGING.md` |
+| AR aging formulas | `ar.FormulaVersion`, echoed on `Result.FormulaVersion` | Aging-basis/bucket assignment (`buckets.go`), DSO (`dso.go`), historical trend/migration (`trends.go`), collection metrics (`collections.go`), concentration (`concentration.go`), every flag-trigger rule (`flags.go`) (`accounting/ar`) |
 
 **The rule for bumping a version:** whenever a formula, an availability/
 validation rule, a default, a sign convention, or an output shape changes
