@@ -244,6 +244,7 @@ packages defined here — see
 
 ```
 go-valuate/
+  accounting/ledger/         general ledger / trial balance domain engine: chart of accounts, journal entries, balances, trial balance (built or imported), hierarchy rollups — independent of financial.Code (see docs/LEDGER.md)
   ingestion/                 CSV/XLSX/PDF bytes -> raw tabular rows (no classification)
   ingestion/csv/              CSV parser (encoding/csv, zero external dependencies)
   ingestion/xlsx/              XLSX parser (github.com/xuri/excelize/v2)
@@ -6057,6 +6058,7 @@ persist historical valuations").
 | Management-reporting pack assembly | `management.FormulaVersion`, echoed on `management.Report.FormulaVersion` | Which sibling fields populate each `Section` (`series.go`, `tables.go`, `issues.go`, `chart.go`), the KPI-selection rule (`kpi.go`), and the coverage/version-echo computation (`coverage.go`) (`reporting/management`) |
 | Business diagnostic mining rules | `diagnostics.FormulaVersion`, echoed on `diagnostics.Result.FormulaVersion` | Every `mine*` function's field-to-`Finding` mapping (`mine_flags.go`, `mine_ratios.go`, `mine_anomalies.go`, `mine_status.go`, `mine_metrics.go`, `mine_salereadiness.go`), the `Category` assignment per source, and the `Strengths`/`Concerns`/`Opportunities` split rule (`analytics/diagnostics`) |
 | Business diagnostic health score | `diagnostics.ScoreVersion`, echoed on `diagnostics.Score.Version` | The per-category neutral-baseline/Strength-ceiling/Concern-floor formula and the averaging-over-available-categories rule (`score.go`) — versioned separately from `diagnostics.FormulaVersion` since a caller may change which findings are mined independently of how already-mined findings are weighted into one composite score (`analytics/diagnostics`) |
+| General ledger / trial balance schema | `ledger.SchemaVersion`, echoed on `TrialBalance.SchemaVersion`/`NormalizedTrialBalance.SchemaVersion`/`IntegrityReport.SchemaVersion` | The `Account`/`JournalEntry`/`JournalLine`/`Ledger`/`Balance`/`TrialBalance`/`TrialBalanceInput`/`NormalizedTrialBalance`/`Issue` shapes and the validation/balance/trial-balance/rollup rules that produce them (`accounting/ledger`) — no separate `FormulaVersion`, since every calculation is a direct consequence of the double-entry rules `SchemaVersion` already covers; see `docs/LEDGER.md` |
 
 **The rule for bumping a version:** whenever a formula, an availability/
 validation rule, a default, a sign convention, or an output shape changes

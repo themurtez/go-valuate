@@ -1,0 +1,2 @@
+- Do not use git commands unless instructed.
+- At the end of each task that involves changes, update README.md with the summary (the same summary you give the user at the end of task completion).
