@@ -271,6 +271,7 @@ go-valuate/
   analytics/valuedrivers/    deterministic driver/scenario sensitivity: re-runs orchestrator+consensus under caller-defined metric/assumption changes, one-factor-at-a-time and combined
   transactions/acquisition/ acquisition screening: price multiples, consensus premium/discount, financing/DSCR (via analytics/debt), returns, scenarios, caller-defined red flags
   transactions/dealstructure/ acquisition financing structure: sources and uses, debt tranches/seller note (own amortization engine incl. balloons), earnout schedule, funding gap/surplus
+  transactions/salereadiness/ deterministic sale-readiness assessment: 11 dimension statuses from optional QoE/working-capital/concentration/revenue-quality/consensus/metrics results plus a business profile, blockers/risks/strengths/missing-information/opportunities, optional overall score
   valuation/                 common valuation result envelope (value types, bridge, issues)
   valuation/sde/              SDE multiple method
   valuation/ebitda/           EBITDA multiple method
@@ -5050,6 +5051,120 @@ degenerate empty-input case, no-mutation-of-caller-input (including the
 earnout-sort not mutating the caller's slice in place), and full JSON
 round-trip/determinism coverage for both `Input` and `Result`).
 
+### `transactions/salereadiness`
+
+A deterministic **sale-readiness assessment**: given whichever of a
+business's already-computed financial/analytics results a caller has on
+hand — `analytics/qoe`, `analytics/workingcapital`,
+`analytics/concentration`, `analytics/revenuequality`,
+`valuation/consensus`, `financial/metrics` — plus a caller-supplied
+`valuation/profile.Profile` and this package's own `DataQuality` read,
+`Calculate` classifies 11 fixed dimensions (financial record quality,
+earnings stability, normalization burden, customer concentration,
+recurring revenue, owner dependence, margin trend, working-capital
+stability, debt/leverage, data completeness, valuation-method consensus),
+derives blockers/risks/strengths/missing-information/opportunities, and
+computes an optional overall heuristic score. It answers "what would a
+buyer's diligence likely flag, and what is still missing to know," never
+"will this business sell" — **it makes no guarantee of a sale outcome**.
+
+**Every input is optional; a missing module narrows coverage, never
+scores zero.** This is the package's central design rule (directly from
+its own prompt brief). Each of the 11 dimensions is classified
+independently from whichever inputs are actually present; an absent
+input classifies that dimension `StatusUnassessed` — listed in
+`Result.MissingInformation` and excluded from both `Result.Coverage` and
+`computeOverallScore`'s divisor — rather than being scored as though it
+were a `StatusConcerning` finding. `Result.Coverage.AssessedDimensions`
+lets a caller see at a glance how much of the full 11-dimension surface
+was actually reached.
+
+**No new figures computed from a dataset.** Unlike most `analytics/`
+packages, this one performs no traversal of `financial.FinancialDataset`,
+`financial/adjustments`, or a customer ledger itself — it is a pure
+aggregation layer that reads already-computed `Result`s from five sibling
+packages plus a business profile, mirroring `analytics/valuedrivers`' and
+`transactions/acquisition`'s identical "compose, don't recompute" design.
+`Input.Dataset`/`Input.Metrics` are read only for period counts and the
+most recent `metrics.Snapshot` (via `mostRecentSnapshot`, itself modeled
+on `analytics/qoe.chronologicalPeriods`' exact
+`FiscalYear`/`Type`/`SequenceInYear` tie-break rule).
+
+**Status, not a per-dimension score.** Each dimension classifies to one
+of `StatusStrong`/`StatusAcceptable`/`StatusWeak`/`StatusConcerning`/
+`StatusUnassessed` — a structured, matchable classification (mirroring
+`workingcapital.TrendDirection`/`review.ReadinessState`'s identical
+"never inferred from free text" discipline), not an invented per-
+dimension numeric formula. Every threshold-graded dimension reads its
+threshold from caller-supplied `Policy` (e.g.
+`MaxAcceptableLargestCustomerShare`); a zero-value threshold means "not
+specified," and the dimension still classifies (as `StatusAcceptable`)
+from the raw figure alone rather than silently applying an invented
+default — the same fully caller-driven threshold model
+`analytics/debt.LenderPolicy`/`transactions/acquisition.RedFlagThresholds`
+already established.
+
+**The one explicit overall score.** `Result.OverallScore` is computed
+only when at least one dimension was assessed (Prompt 31: "overall
+readiness score only if formula is explicit"). The formula
+(`computeOverallScore`, `score.go`) is fixed and simple: each assessed
+dimension contributes a fixed point value by its `Status` (`Strong`=10,
+`Acceptable`=7, `Weak`=3, `Concerning`=0), averaged over the number of
+dimensions actually assessed and scaled to `[0, 100]` — never diluted by
+`StatusUnassessed` entries, which contribute to neither the numerator nor
+the divisor. This mirrors `qoe.Score`'s identical "never introduces a new
+threshold of its own, only weights already-computed classifications"
+design.
+
+**Blockers vs. risks.** A `StatusConcerning` classification on one of a
+fixed, documented subset of dimensions (`blockingDimensions` in
+`findings.go`: financial record quality, earnings stability, customer
+concentration, owner dependence, debt/leverage — the dimensions that
+reflect a fact about the business rather than analysis coverage) produces
+a `Blocker`; every other `StatusConcerning`/`StatusWeak` classification
+produces a `Risk`. Negative maintainable/reported EBITDA additionally
+triggers a fixed structural `Blocker`
+(`negativeEarningsBlocker`) independent of any single dimension's
+threshold — a business that is not currently profitable is a blocking
+fact regardless of `Policy`.
+
+**Opportunities are actions, never promises.** Every `Opportunity` is
+phrased as "do X" (e.g. "Commission a review or audit of the financial
+statements...") mechanically derived from a `StatusWeak`/
+`StatusConcerning`/`StatusUnassessed` dimension — never a subjective
+judgment about how the finding would affect a sale, consistent with the
+package's no-guaranteed-sale disclaimer.
+
+Files:
+
+- **`types.go`** — `Value`/`Unavailable`/`AvailableValue`, `DataQuality`,
+  `Policy`, `Input`, `DimensionCode`/`dimensionOrder`, `Status`,
+  `Dimension`, `Severity`, `Blocker`, `Risk`, `Strength`,
+  `MissingInformation`, `OpportunityCode`/`Opportunity`, `Coverage`,
+  `IssueSeverity`/`IssueCode`/`Issue`/`HasErrors`, `Score`/
+  `ScoreComponent`, `Result`, `FormulaVersion`, `ScoreVersion`.
+- **`helpers.go`** — `chronologicalSnapshots`/`mostRecentSnapshot`: the
+  `metrics.Snapshot` chronological-ordering helper, mirroring
+  `analytics/qoe.chronologicalPeriods`.
+- **`dimensions.go`** — one `classify*` function per `DimensionCode`,
+  plus `buildDimensions`.
+- **`findings.go`** — `buildFindings` (Blockers/Risks/Strengths/
+  MissingInformation/Opportunities derivation) and
+  `negativeEarningsBlocker`.
+- **`score.go`** — `computeOverallScore`, `labelForScore`.
+- **`salereadiness.go`** — `Calculate(Input) Result`: input-availability
+  issue detection, dimension/coverage/findings/score orchestration.
+
+See [`transactions/salereadiness/salereadiness_test.go`](transactions/salereadiness/salereadiness_test.go),
+[`transactions/salereadiness/determinism_test.go`](transactions/salereadiness/determinism_test.go),
+and [`transactions/salereadiness/roundtrip_test.go`](transactions/salereadiness/roundtrip_test.go)
+for every case the task requires (a ready/stable business, an
+owner-dependent business, a concentrated customer base, poor financial
+records, missing analytical modules, negative earnings, no-Policy
+threshold fallback, the degenerate empty-input case,
+no-mutation-of-caller-input, and full JSON round-trip/determinism
+coverage).
+
 ### `valuation/e2e`
 
 Not a reusable package — a single end-to-end deterministic fixture test
@@ -5382,6 +5497,8 @@ persist historical valuations").
 | Value driver/scenario formulas | `valuedrivers.FormulaVersion`, echoed on `valuedrivers.Result.FormulaVersion` | Every `DriverType`'s exact per-method mutation rule (which `Input` field(s) it changes and how), the `LinkageApplied`/`LinkageNotApplicable`/`LinkageMethodExcluded` classification, the one-factor-at-a-time vs. combined-scenario compounding order, and the value/percent-delta formulas (`analytics/valuedrivers`) |
 | Acquisition screening formulas | `acquisition.FormulaVersion`, echoed on `acquisition.Result.FormulaVersion` | The price-to-revenue/EBITDA/SDE multiple formulas, the premium/discount-to-consensus formula, the sources-and-uses/required-equity arithmetic, the annual-debt-service/DSCR/post-debt-cash-flow formulas (via `analytics/debt.Amortize`), the cash-on-cash-return/simple-payback-period formulas, the leverage formula, the downside/upside scenario methodology, and the red-flag threshold rules (`transactions/acquisition`) |
 | Deal-structure/financing formulas | `dealstructure.FormulaVersion`, echoed on `dealstructure.Result.FormulaVersion` | The sources-and-uses/required-equity/funding-gap arithmetic, this package's own per-tranche amortization formula (including interest-only handling and balloon-payment sizing — distinct from `analytics/debt.Amortize`'s formula), the seller-note and earnout schedule derivations, the financing-percentage formula, and the annual-debt-service aggregation across tranches (`transactions/dealstructure`) |
+| Sale-readiness assessment formulas | `salereadiness.FormulaVersion`, echoed on `salereadiness.Result.FormulaVersion` | Every `DimensionCode`'s classification rule and Policy-threshold comparison (`dimensions.go`), the Blocker/Risk/Strength/MissingInformation/Opportunity derivation rules including `blockingDimensions` and `negativeEarningsBlocker` (`findings.go`) (`transactions/salereadiness`) |
+| Sale-readiness heuristic score | `salereadiness.ScoreVersion`, echoed on `salereadiness.Score.Version` | The fixed per-`Status` point value, averaging-over-assessed-dimensions, and `[0, 100]` scaling formula (`score.go`) — versioned separately from `salereadiness.FormulaVersion` since a caller may change how dimensions are classified independently of how already-classified dimensions are weighted into one composite number (`transactions/salereadiness`) |
 | AI request/response schema | `ai.RequestSchemaVersion`, echoed on `ai.Provenance.RequestSchemaVersion` | The `Request`/`Response` wire shape `financial/classification/ai` sends to/expects from a `Classifier` |
 | AI fallback orchestration | `ai.OrchestrationVersion`, echoed on `ai.Provenance.OrchestrationVersion` | The trigger/fallback/safety decision logic in `ClassifyWithFallback`/`ClassifyBatchWithFallback` (which `FallbackMode` runs AI when, structural-row skipping, disagreement handling) |
 | OpenAI adapter (classification) | `openai.AdapterVersion`, echoed on `ai.Provenance.AdapterVersion` | This specific provider adapter's prompt-construction/response-parsing logic (`financial/classification/ai/openai`) |
@@ -5454,6 +5571,9 @@ unverified incidental property of the standard library).
 | `forecast.ScenarioResult.ProjectedPeriods` / `WorkingCapital` / `CashFlow` | Forecast-period-number order, `1..Input.Horizon`, always — there is no chronological-vs-lexical fallback here (unlike every dataset-bound sibling above) since a forecast period has no `financial.Period` string to order by in the first place |
 | `forecast.PeriodPL.RevenueLines` / `COGSLines` / `OpexLines` | Sorted by `financial.Code` ascending (`analytics/forecast`'s `sortedCodesByAmount`), never Go map order |
 | `forecast.ScenarioResult.Trace` | Calculation order: for each forecast period in sequence, one `TraceStep` per line as it was computed (Total Revenue, Total COGS, Gross Profit, Total Opex, EBIT, EBITDA, SDE, Pretax Income, Net Income) |
+| `salereadiness.Result.Dimensions` | Fixed `dimensionOrder` (financial record quality, earnings stability, normalization burden, customer concentration, recurring revenue, owner dependence, margin trend, working-capital stability, debt/leverage, data completeness, valuation-method consensus) — always all 11 entries in this order whenever `Available` is true, one per `DimensionCode`, regardless of how many were actually assessed (`transactions/salereadiness`) |
+| `salereadiness.Result.Blockers` / `Risks` / `Strengths` / `MissingInformation` / `Opportunities` | Each in `dimensionOrder` (the same fixed order `Dimensions` is in), since `buildFindings` ranges over `dims` once; `negativeEarningsBlocker`'s structural Blocker (when triggered) is prepended ahead of every dimension-derived Blocker (`transactions/salereadiness`) |
+| `salereadiness.Score.Components` | Same `dimensionOrder` as `Result.Dimensions`, one entry per assessed (non-`StatusUnassessed`) dimension, `StatusUnassessed` entries omitted entirely (`transactions/salereadiness`) |
 
 ## Error taxonomy
 
@@ -5657,6 +5777,23 @@ message strings:
   exactly like the systems above (`UNRECOGNIZED_STATUS`,
   `MISSING_CODE`); a caller must branch on `Code`, never parse `Reason`,
   which is free text.
+- **`salereadiness.Issue{Code salereadiness.IssueCode, Severity,
+  Message}`** — `transactions/salereadiness`'s own separate system
+  (`NO_INPUT_SUPPLIED`, `QOE_UNAVAILABLE`, `WORKING_CAPITAL_UNAVAILABLE`,
+  `CONCENTRATION_UNAVAILABLE`, `REVENUE_QUALITY_UNAVAILABLE`,
+  `CONSENSUS_UNAVAILABLE`, `METRICS_UNAVAILABLE`,
+  `NO_POLICY_THRESHOLDS`), for the same reason as every `analytics/`
+  sibling above: an input-level sale-readiness-assessment problem (which
+  optional module was left unsupplied) is its own problem domain, distinct
+  from every sibling package's despite reading several of their `Result`
+  types directly. `salereadiness` also defines its own separate
+  `DimensionCode`-scoped `Status` vocabulary
+  (`StatusStrong`/`StatusAcceptable`/`StatusWeak`/`StatusConcerning`/
+  `StatusUnassessed`) and `OpportunityCode` vocabulary, mirroring
+  `qoe.FlagCode`/`ratios.SignalCode`/etc.'s identical input-problem/
+  quality-signal split — except `Status` classifies a dimension
+  (analogous to `workingcapital.TrendDirection`) rather than firing a
+  discrete flag.
 
 Three structured-but-not-error-severity vocabularies exist alongside these
 and are not folded in, since they already serve the "stable, matchable"
