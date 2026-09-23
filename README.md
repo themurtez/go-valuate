@@ -274,6 +274,7 @@ go-valuate/
   transactions/dealstructure/ acquisition financing structure: sources and uses, debt tranches/seller note (own amortization engine incl. balloons), earnout schedule, funding gap/surplus
   transactions/salereadiness/ deterministic sale-readiness assessment: 11 dimension statuses from optional QoE/working-capital/concentration/revenue-quality/consensus/metrics results plus a business profile, blockers/risks/strengths/missing-information/opportunities, optional overall score
   portfolio/diagnostics/     multi-business portfolio scan: ranked findings (margin/revenue/cash/leverage/concentration/valuation/quality/sale-readiness) from condensed per-business summaries, configurable priority score, coverage/missing-data summary
+  reporting/management/     presentation-neutral management-reporting data pack: KPI summary, historical/profitability/liquidity-leverage/cash-flow/working-capital series, variance/forecast tables, top-issues rollup, chart-ready series, from up to 13 optional sibling results — no PDF/HTML/chart rendering, no narrative AI
   valuation/                 common valuation result envelope (value types, bridge, issues)
   valuation/sde/              SDE multiple method
   valuation/ebitda/           EBITDA multiple method
@@ -5435,6 +5436,142 @@ path, custom `Policy` thresholds/weights including an explicit zero
 weight, no-mutation-of-caller-input, and full JSON round-trip/determinism/
 concurrency coverage).
 
+### `reporting/management`
+
+A deterministic **management-reporting data pack**: given whichever of up
+to 13 optional already-computed sibling `Result`s a caller has on hand
+(`financial/metrics`, `analytics/ratios`, `analytics/cashflow`,
+`analytics/workingcapital`, `analytics/qoe`, `analytics/variance`,
+`analytics/forecast`, `analytics/anomalies`, `analytics/concentration`,
+`analytics/revenuequality`, `analytics/debt`, `analytics/covenants`,
+`valuation/consensus`), `Calculate` reshapes them into a fixed, JSON-safe
+`Report` — an executive KPI summary, historical/profitability/
+liquidity-leverage/cash-flow/working-capital series, variance and forecast
+tables, a merged top-issues rollup, and chart-ready series — for a caller
+to render however it chooses. **It renders nothing itself**: no PDF, no
+HTML, no charts, and no narrative text of any kind, AI-generated or
+otherwise — every string field is either a caller-supplied label passed
+through unchanged or a short, fixed-form template built entirely from
+already-computed fields.
+
+**A pure reshaping layer, computing no figure of its own.** Every number
+in `Report` is read directly from an already-computed sibling `Result`;
+`management` never calls `metrics.Calculate`/`ratios.Calculate`/etc. on a
+caller's behalf except one narrow, explicitly documented case:
+`buildHistoricalSeries` recomputes `metrics.Calculate` itself when
+`Input.Metrics.Snapshots` is empty but `Input.Dataset` carries items — the
+same "cheap, pure, no I/O" self-sufficiency choice `analytics/qoe`/
+`analytics/cashflow`/`analytics/ratios` already make for their own
+per-period figures, so a caller supplying only a raw
+`financial.FinancialDataset` still gets a historical series rather than
+silence.
+
+**Fixed sections, not scored dimensions or ranked findings.** Unlike
+`transactions/salereadiness` (fixed dimension statuses) or
+`portfolio/diagnostics` (priority-ranked findings), `Report`'s ten
+sections are identified by `SectionCode` and always populated in
+`sectionOrder`, one typed field of content per section — mirroring
+`valuation/orchestrator.Run.Methods`'s "fixed order regardless of
+availability" rule. Each section independently reports its own
+`Available`, so a caller can range over `Report`'s fields without special-
+casing which sibling inputs happened to be supplied.
+
+**Profitability prefers ratios, falls back to metrics.** `ProfitabilitySeries`
+sources every margin from `Input.Ratios.History`
+(`ReturnOnAssets`/`ReturnOnEquity` included) when `Ratios` is available,
+and falls back to the `GrossMargin`/`EBITDAMargin` figures
+`financial/metrics.Snapshot` already computes — reading them from this
+package's own already-built `HistoricalSeries` rather than re-deriving a
+margin by division, so the fallback never drifts from
+`financial/metrics`'s own formula. `LiquidityLeverageSeries` has no such
+fallback: `analytics/debt`'s coverage figures are single point-in-time
+results with no `Period` of their own, so there is no per-period row to
+join a `Debt`-sourced leverage figure into (`Debt` still contributes to
+`TopIssues` via `Debt.Flags`).
+
+**Top issues are merged, never re-detected.** `TopIssues` translates
+already-detected findings from `Input.Anomalies`, `Input.QoE.Flags`,
+`Input.Debt.Flags`, and breached/near-breached `Input.Covenants.Tests`
+entries onto this package's own three-level `TopIssueSeverity` scale
+(a lossless mapping in every case — all four source packages already use
+an identical info/warning/critical scale), sorted by severity then by
+source declaration order (anomalies, qoe, debt, covenants) then by each
+source's own order — mirroring `analytics/anomalies.Summary`'s
+by-rule/by-severity rollup shape for `TopIssuesSummary`.
+
+**Chart series span historical and forecast under one label.** `ChartSeries`
+for Total Revenue and EBITDA append a forecast tail from
+`Input.Forecast`'s first `ScenarioResults` entry when available, each
+point flagged `IsForecast` so a caller can render the projected portion
+distinctly (e.g. a dashed line) without re-deriving which points are
+projected from the X-axis label alone. `Source` reflects exactly which
+inputs actually contributed points (`"metrics"`, `"forecast"`, or
+`"metrics+forecast"`) — never a fixed label independent of what was
+actually available.
+
+**Coverage counts modules, not dimensions.** `Coverage` has one `WithX`
+field per of the 12 section-backing sibling packages (mirroring
+`portfolio/diagnostics.CoverageCounts`'s per-sibling-package shape more
+than `transactions/salereadiness.Coverage`'s abstract-dimension-count
+shape, since `management`'s sections map 1:1 to named sibling packages).
+`Consensus` is tracked (`WithConsensus`) but excluded from
+`TotalModules`/`CoveragePercent`, since it contributes only a handful of
+`ExecutiveSummary` KPIs rather than backing an entire section the way the
+other twelve do. `ModuleVersions` echoes every contributing sibling's own
+`FormulaVersion` (or `SemanticsVersion`) alongside `management`'s own, so
+a persisted `Report` remains self-describing about exactly which upstream
+formula versions produced it.
+
+Files:
+
+- **`types.go`** — `FormulaVersion`, `Value`/`Unavailable`/`AvailableValue`,
+  `Input`, `IssueSeverity`/`IssueCode`/`Issue`/`HasErrors`, `SectionCode`/
+  `sectionOrder`, `KPI`, `Unit`, `ExecutiveSummary`.
+- **`series_types.go`** — `HistoricalPeriod`/`HistoricalSeries`,
+  `ProfitabilityPeriod`/`ProfitabilitySeries`,
+  `LiquidityLeveragePeriod`/`LiquidityLeverageSeries`,
+  `CashFlowPeriod`/`CashFlowSeries`,
+  `WorkingCapitalPeriod`/`WorkingCapitalSeries`.
+- **`table_types.go`** — `VarianceLine`/`VarianceTable`/`VarianceTables`,
+  `ForecastPeriod`/`ForecastScenarioTable`/`ForecastTables`.
+- **`issue_types.go`** — `TopIssueSeverity`, `TopIssueSource`, `TopIssue`,
+  `TopIssuesSummary`, `TopIssues`.
+- **`chart_types.go`** — `ChartPoint`, `ChartSeries`, `ChartSeriesSection`.
+- **`coverage_types.go`** — `Coverage`, `ModuleVersion`, `ModuleVersions`,
+  `Report`.
+- **`management.go`** — `Calculate(Input) Report`: input-availability
+  checks, section assembly in `sectionOrder`, coverage/version computation.
+- **`series.go`** — `buildHistoricalSeries` (with the `Dataset` fallback),
+  `buildProfitabilitySeries`, `buildLiquidityLeverageSeries`,
+  `buildCashFlowSeries`, `buildWorkingCapitalSeries`.
+- **`tables.go`** — `buildVarianceTables`, `buildForecastTables`.
+- **`issues.go`** — `buildTopIssues`, one `*SeverityToTopIssue` translation
+  function per contributing sibling package.
+- **`kpi.go`** — `buildExecutiveSummary`, `kpiFromValue`, `periodIsAfter`
+  (a best-effort chronological comparison across several independently-
+  sourced KPI series, exact when `Input.PeriodMeta` covers every candidate
+  period).
+- **`chart.go`** — `buildChartSeries`, `chartFromHistorical` (with an
+  explicit `forecastExtract` parameter per series, never a string switch
+  on the display label), `chartFromHistoricalOnly`.
+- **`coverage.go`** — `buildCoverage`, `buildModuleVersions`.
+- **`helpers.go`** — `orderedSnapshots` (this package's own copy of the
+  `analytics/ratios.chronologicalPeriods`-style all-or-nothing
+  fallback-plus-warning rule, since `financial/metrics.Result.Snapshots`
+  is not guaranteed chronologically ordered regardless of whether
+  `PeriodMeta` was supplied to that call).
+
+See [`reporting/management/management_test.go`](reporting/management/management_test.go),
+[`reporting/management/determinism_test.go`](reporting/management/determinism_test.go),
+and [`reporting/management/roundtrip_test.go`](reporting/management/roundtrip_test.go)
+for every case the task requires (the full 13-module fixture, partial
+modules, entirely missing data, the `Dataset`-only historical-series
+fallback, the profitability ratios-vs-metrics fallback, chart-series
+forecast tails and their source-label attribution, top-issues merging/
+sorting across all four contributing sources, coverage/module-version
+counts, no-mutation-of-caller-input, and full JSON round-trip/determinism/
+concurrency coverage).
+
 ### `valuation/e2e`
 
 Not a reusable package — a single end-to-end deterministic fixture test
@@ -5776,6 +5913,7 @@ persist historical valuations").
 | AI adjustment-suggestion request/response schema | `ai.RequestSchemaVersion`, echoed on `ai.Provenance.RequestSchemaVersion` | The `Request`/`Response` wire shape `financial/adjustments/ai` sends to/expects from a `Suggester` — a distinct constant/package from classification's identically-named one |
 | AI adjustment-suggestion orchestration | `ai.OrchestrationVersion`, echoed on `ai.Provenance.OrchestrationVersion` | The batching/validation/provenance decision logic in `SuggestAdjustments`/`SuggestAdjustmentsBatch` (`financial/adjustments/ai`) — a distinct constant/package from classification's identically-named one |
 | OpenAI adapter (adjustment suggestions) | `openai.AdapterVersion`, echoed on `ai.Provenance.AdapterVersion` | This specific provider adapter's prompt-construction/response-parsing logic (`financial/adjustments/ai/openai`) |
+| Management-reporting pack assembly | `management.FormulaVersion`, echoed on `management.Report.FormulaVersion` | Which sibling fields populate each `Section` (`series.go`, `tables.go`, `issues.go`, `chart.go`), the KPI-selection rule (`kpi.go`), and the coverage/version-echo computation (`coverage.go`) (`reporting/management`) |
 
 **The rule for bumping a version:** whenever a formula, an availability/
 validation rule, a default, a sign convention, or an output shape changes
@@ -5852,6 +5990,11 @@ unverified incidental property of the standard library).
 | `consolidation.Result.EliminationsApplied` | Sorted by `EntityID`, then `Code`, then `Period` |
 | `consolidation.Result.CurrencyConversions` | Sorted by `EntityID`, then `Period` |
 | `consolidation.Result.ReconciliationIssues` / `Warnings` / `Errors` | Sorted by `EntityID`, then `Period` — a real `sort.SliceStable`, never left to `Calculate`'s internal per-check append order (`analytics/consolidation`) |
+| `management.Report`'s section fields | Fixed `sectionOrder` (executive summary, historical series, profitability series, liquidity/leverage series, cash-flow series, working-capital series, variance tables, forecast tables, top issues, chart series) — always all 10 sections populated in this order whenever `Available` is true, one typed field per `SectionCode`, each independently reporting its own availability (`reporting/management`) |
+| `management.TopIssues.Issues` | Sorted by `Severity` (critical, then warning, then info), then by `Source` declaration order (anomalies, qoe, debt, covenants), then by each source's own slice order — never re-ranked by any score of this package's own (`reporting/management`) |
+| `management.ExecutiveSummary.KPIs` | Fixed declaration order (revenue/gross-profit/EBITDA/net-income from metrics, EBITDA margin from profitability, current-ratio/net-debt-to-EBITDA from liquidity-leverage, free-cash-flow/conversion from cash flow, NWC from working capital, largest-customer share from concentration, recurring-revenue percent from revenue quality, indicated value from consensus); a KPI whose underlying figure is entirely unavailable is omitted, never included as an unavailable entry (`reporting/management`) |
+| `management.Coverage.MissingModules` | `Input`'s own field declaration order (metrics, ratios, cash flow, working capital, QoE, variance, forecast, anomalies, concentration, revenue quality, debt, covenants) restricted to the modules with `WithX == false` (`reporting/management`) |
+| `management.ModuleVersions.Modules` | Fixed order matching `Coverage`'s `WithX` field order plus `consensus` last — always all 13 entries regardless of availability, an unavailable module's `Version` is empty rather than the entry being omitted (`reporting/management`) |
 
 ## Error taxonomy
 
@@ -6089,6 +6232,20 @@ message strings:
   prior `Issue` shape: `EntityID` and `Period` fields alongside `Code`,
   since a consolidation problem is almost always scoped to one specific
   entity and/or period rather than the calculation as a whole.
+- **`management.Issue{Code management.IssueCode, Severity, Message}`** —
+  `reporting/management`'s own separate system
+  (`NO_INPUT_SUPPLIED`, `METRICS_UNAVAILABLE`, `RATIOS_UNAVAILABLE`,
+  `CASH_FLOW_UNAVAILABLE`, `WORKING_CAPITAL_UNAVAILABLE`,
+  `QOE_UNAVAILABLE`, `VARIANCE_UNAVAILABLE`, `FORECAST_UNAVAILABLE`,
+  `ANOMALIES_UNAVAILABLE`, `CONCENTRATION_UNAVAILABLE`,
+  `REVENUE_QUALITY_UNAVAILABLE`, `DEBT_UNAVAILABLE`,
+  `COVENANTS_UNAVAILABLE`, `CONSENSUS_UNAVAILABLE`,
+  `NO_PERIOD_META_FOR_HISTORICAL_ORDER`), its own problem domain for the
+  same reason as every sibling above: an input-availability problem for a
+  pure aggregation/reshaping layer (which of up to 13 optional sibling
+  results was supplied) is a different problem domain from any analysis
+  package's own input-validity problem, even though `management` reads
+  most of those packages' `Result` types directly.
 
 Three structured-but-not-error-severity vocabularies exist alongside these
 and are not folded in, since they already serve the "stable, matchable"
