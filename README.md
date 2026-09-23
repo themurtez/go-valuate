@@ -266,6 +266,7 @@ go-valuate/
   analytics/variance/        budget/forecast/prior-period vs. actual variance: line/category/bridge analysis
   analytics/forecast/        deterministic financial projections and scenario sets from caller-supplied assumptions
   analytics/debt/            debt service coverage, leverage, and caller-defined debt capacity (DSCR, amortization, scenarios)
+  analytics/covenants/       caller-supplied covenant rules vs. already-calculated metrics: pass/fail/unavailable, headroom, warning buffer
   valuation/                 common valuation result envelope (value types, bridge, issues)
   valuation/sde/              SDE multiple method
   valuation/ebitda/           EBITDA multiple method
@@ -3611,6 +3612,114 @@ debt service held fixed and a policy-breach flag, invalid loan terms
 excluded but reported by index, and JSON/determinism) exercised against
 hand-built fixtures.
 
+### `analytics/covenants`
+
+A deterministic **financial covenant monitor**: given a batch of
+caller-defined covenant tests — each an ID, a metric label, an operator
+(`>=`, `<=`, `>`, `<`, `=`), a threshold, an already-calculated actual
+figure, a test period, and optional cure/grace metadata and warning-buffer
+settings — this package evaluates every test independently and reports
+pass/fail/unavailable, direction-aware headroom, warning-buffer (near-
+breach) status, a plain-language explanation, and an aggregate summary of
+breaches, near breaches, and unavailable tests.
+
+Like `analytics/debt`/`analytics/variance`, this package is deliberately
+independent of `financial.FinancialDataset` — a covenant's actual figure
+is typically a DSCR or leverage multiple already computed upstream (via
+`analytics/debt`), a liquidity ratio from `analytics/ratios`, or a balance-
+sheet figure pulled from a compliance certificate. **This package never
+computes DSCR, leverage, EBITDA, net worth, or any other metric itself**;
+a caller supplies each covenant's already-calculated `Actual` value, and
+this package's only job is comparing it against `Threshold` via `Operator`
+and classifying the result. It also **never encodes loan-document or
+legal interpretation**: `CureGrace` metadata is recorded verbatim and
+never changes a test's `Status`, `Headroom`, or `WarningBufferStatus` — a
+cure period's legal effect on an actual default is a determination for the
+credit agreement and counsel, not this package.
+
+Availability follows this repository's standard convention: `Value{
+Available bool; Amount float64 }`, duplicated locally per this
+repository's established convention rather than importing another
+analytics package.
+
+**Operators and headroom.** `Operator` (`>=`/`<=`/`>`/`<`/`=`) is a new
+taxonomy this package introduces — no generic comparator type existed
+elsewhere in this repository (`analytics/variance` solved its structurally
+similar favorable/unfavorable problem with a domain-specific bool instead).
+`Headroom` is the signed distance between `Actual` and `Threshold` in the
+direction of safety: for a minimum-style covenant (`>=`/`>`) it is
+`Actual - Threshold`; for a maximum-style covenant (`<=`/`<`) it is
+`Threshold - Actual`; positive means room before breaching, negative means
+already breached by that amount. `OperatorEQ` has no single safe
+direction, so `Headroom` is left unavailable for an exact-equality
+covenant rather than reporting a signed distance that doesn't answer "how
+much room before breach." An empty or unrecognized `Operator` produces
+`IssueInvalidOperator` and `StatusUnavailable` — this package never
+guesses a direction for an operator it doesn't recognize.
+
+**Metrics.** `Metric` labels what kind of figure `Actual` represents
+(`DSCR`, `DEBT_TO_EBITDA`, `NET_DEBT_TO_EBITDA`, `CURRENT_RATIO`,
+`QUICK_RATIO`, `MINIMUM_EBITDA`, `MINIMUM_NET_WORTH`, `MAXIMUM_CAPEX`, or
+`CUSTOM` with a caller-supplied `CustomMetricLabel`) for display and
+`Explanation` purposes only — this package applies the identical
+`Operator`/`Threshold`/`Headroom` logic regardless of which `Metric` a
+test names, so a fully custom, lender-specific covenant metric is
+evaluated exactly as any named one.
+
+**Warning buffer.** `WarningBufferPercent` (a fraction of `|Threshold|`)
+and `WarningBufferAmount` (an absolute headroom floor) are independent,
+off-by-default, OR-of-two-legs settings per covenant test — the same
+pattern `review.IsMaterial`/`analytics/variance.Policy` already use for
+materiality — since a meaningful DSCR buffer and a meaningful net-worth
+buffer are inherently different scales and belong on the rule, not a
+single package-wide policy. `WarningBufferStatus` only classifies a
+*passing* test (`WarningBufferWithinBuffer` means it currently passes but
+would fail on a small adverse move — a near breach); a failed or
+unavailable test reports `WarningBufferNotApplicable` rather than being
+double-counted as both a breach and a near breach in `Summary`.
+
+**Availability, not silence.** A missing `CovenantID`, an unrecognized
+`Operator`, or an unavailable `Actual` each produce a `StatusUnavailable`
+`TestResult` (still included in `Result.Tests`, so every input row is
+reflected in output) plus a structured `Issue` — never a dropped test,
+a silent pass, or a fabricated zero.
+
+**Summary.** `Summary` tallies `Breaches`/`NearBreaches`/`Unavailable`
+plus their `CovenantID` lists for direct display, and `ByPeriod` breaks
+the same three counts down per distinct `financial.Period` present in the
+input batch, sorted lexically (this package draws no chronological
+inference from `financial.Period` — the same no-guessing rule every
+analytics sibling package's `PeriodInfo` already documents, though this
+package needs no `PeriodInfo` of its own since it computes no trend across
+periods, only independent per-period aggregates).
+
+Files:
+
+- **`types.go`** — `Value`, `Operator`, `Metric`, `CureGrace`,
+  `CovenantTest`, `Input`, `IssueCode`/`IssueSeverity`/`Issue`,
+  `HasErrors`, `Status`, `WarningBufferStatus`, `TestResult`,
+  `PeriodSummary`, `Summary`, `Result`, `FormulaVersion`.
+- **`evaluate.go`** — `evaluateTest`: per-test validation, operator
+  evaluation, headroom, warning-buffer classification, and the
+  deterministic `Explanation` sentence builder.
+- **`covenants.go`** — `Calculate(Input) Result`: top-level orchestration,
+  duplicate-covenant-ID detection, and `Summary`/`PeriodSummary`
+  aggregation.
+
+See [`analytics/covenants/covenants_test.go`](analytics/covenants/covenants_test.go),
+[`analytics/covenants/determinism_test.go`](analytics/covenants/determinism_test.go),
+and [`analytics/covenants/roundtrip_test.go`](analytics/covenants/roundtrip_test.go)
+for every scenario the task requires (a comfortably passing test, a
+minimum-style and a maximum-style breach with the headroom direction
+verified for each, a near breach via both the percent-of-threshold and
+absolute-amount warning-buffer legs plus confirmation a failed test is
+never also classified within-buffer, an unavailable-actual test, an
+unrecognized-operator test, a custom caller-supplied metric, cure/grace
+metadata passing through unchanged, multiple covenants across multiple
+periods with a per-period summary breakdown, the equality operator's
+headroom-unavailable rule, no-mutation of caller-owned input, and
+JSON/determinism) exercised against hand-built fixtures.
+
 ### `valuation`
 
 Implements the individual valuation methods themselves: SDE multiple,
@@ -4787,6 +4896,7 @@ persist historical valuations").
 | Variance analysis formulas | `variance.FormulaVersion`, echoed on `variance.Result.FormulaVersion` | The absolute/percentage variance formulas, the favorable/unfavorable direction rules (taxonomy-category defaults, the mixed other-income-statement per-code rule, and `DirectionOverrides` precedence), the materiality test, the contribution-to-total-variance formula, the category rollup, and the period-trend formula (`analytics/variance`) |
 | Forecast/scenario formulas | `forecast.FormulaVersion`, echoed on `forecast.Result.FormulaVersion` | The historical-base derivation, the per-period compounding rule for revenue/COGS/opex (aggregate-plus-override precedence, the `FixedAmount` proportional-split rule, `OpexMethodExcludeAmount`'s one-time-item exclusion), the EBIT/EBITDA/SDE/margin/tax/net-income formulas, the working-capital and cash-flow bridge, the debt-service-coverage formula, and every `Apply*` scenario-transformation helper's exact arithmetic (`analytics/forecast`) |
 | Debt capacity/DSCR formulas | `debt.FormulaVersion`, echoed on `debt.Result.FormulaVersion` | The amortization/payment formula (including interest-only handling), the annual-debt-service aggregation, the DSCR/fixed-charge-coverage/leverage/interest-coverage formulas, the maximum-debt-under-DSCR and maximum-debt-under-leverage solvers, the combined-capacity (most-restrictive-constraint) rule, and the downside-scenario methodology (`analytics/debt`) |
+| Covenant evaluation formulas | `covenants.FormulaVersion`, echoed on `covenants.Result.FormulaVersion` | The operator-evaluation rule, the direction-aware headroom formula, the pass/fail/unavailable classification, and the warning-buffer (near-breach) classification (`analytics/covenants`) |
 | AI request/response schema | `ai.RequestSchemaVersion`, echoed on `ai.Provenance.RequestSchemaVersion` | The `Request`/`Response` wire shape `financial/classification/ai` sends to/expects from a `Classifier` |
 | AI fallback orchestration | `ai.OrchestrationVersion`, echoed on `ai.Provenance.OrchestrationVersion` | The trigger/fallback/safety decision logic in `ClassifyWithFallback`/`ClassifyBatchWithFallback` (which `FallbackMode` runs AI when, structural-row skipping, disagreement handling) |
 | OpenAI adapter (classification) | `openai.AdapterVersion`, echoed on `ai.Provenance.AdapterVersion` | This specific provider adapter's prompt-construction/response-parsing logic (`financial/classification/ai/openai`) |
