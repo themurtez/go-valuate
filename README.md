@@ -265,6 +265,7 @@ go-valuate/
   analytics/anomalies/       expense anomaly / margin-leakage detection: deterministic spike/variance/pattern rules
   analytics/variance/        budget/forecast/prior-period vs. actual variance: line/category/bridge analysis
   analytics/forecast/        deterministic financial projections and scenario sets from caller-supplied assumptions
+  analytics/debt/            debt service coverage, leverage, and caller-defined debt capacity (DSCR, amortization, scenarios)
   valuation/                 common valuation result envelope (value types, bridge, issues)
   valuation/sde/              SDE multiple method
   valuation/ebitda/           EBITDA multiple method
@@ -3481,6 +3482,135 @@ coverage bridge, and JSON/determinism including a map-order stress test)
 exercised against both hand-built fixtures and the repository's realistic
 `normalized_hvac_multi_year.json` fixture.
 
+### `analytics/debt`
+
+A deterministic **debt service coverage / leverage / debt capacity**
+analysis: given a business's normalized/maintainable EBITDA (or an
+optional cash-flow figure), its existing and proposed loans, and an
+optional lender policy, this package computes annual debt service (via a
+built-in amortization solver), DSCR, fixed-charge coverage, debt/EBITDA
+and net-debt/EBITDA leverage, interest coverage, the maximum debt the
+business could support under a caller-supplied minimum DSCR and/or
+leverage cap, the more restrictive combined capacity limit and headroom
+against it, and coverage under caller-defined downside stress scenarios.
+
+Unlike `analytics/cashflow`/`analytics/ratios` (which recompute EBITDA and
+other figures directly from a `financial.FinancialDataset`), this package
+is deliberately independent of `financial.FinancialDataset` and the
+`financial.Code` taxonomy — the same design `analytics/concentration`
+already established. Debt capacity analysis is frequently performed
+against a caller's own already-normalized EBITDA figure (already run
+through `financial/metrics` and `financial/adjustments` upstream), a
+lender-supplied term sheet, or a standalone "what could this business
+support" what-if calculation with no dataset in the loop at all. A caller
+with a `financial.FinancialDataset` computes EBITDA itself and passes the
+resulting figure into `Input.EBITDA`; this package never requires or
+recomputes it.
+
+**This package never claims lender approval.** Every doc comment and the
+package doc comment itself are explicit that this is a mathematical
+capacity/coverage analysis under the assumptions supplied, never a
+statement that a lender would approve any amount — `MaximumCapacity`'s doc
+comment repeats this explicitly.
+
+Availability follows this repository's standard convention: `Value{
+Available bool; Amount float64 }` distinguishes "computed/reported to be
+exactly 0" from "unknown because a required input was absent," duplicated
+locally (mirroring `cashflow.CashFlowValue`) rather than importing
+`financial/metrics` into a package that otherwise has no dependency on it.
+
+**Amortization.** `LoanTerms{Principal, AnnualInterestRate,
+AmortizationYears, Frequency, InterestOnlyYears}` describes one loan (an
+existing balance or a proposed structure) without requiring the caller to
+pre-compute a payment schedule. `Amortize` derives an `AmortizationSchedule`
+using the standard level-payment formula (`payment = principal x rate / (1
+- (1 + rate)^-n)`, or straight-line when the rate is exactly zero), and
+reports both `SteadyStateAnnualDebtService` (a typical year once
+amortization is underway) and `FirstYearAnnualDebtService` (which may be
+lower, reflecting an `InterestOnlyYears` period, a straddled
+transition-year blend, or identical to the steady state when there is no
+interest-only period). An interest-only period defers amortization without
+shortening it: a 10-year loan with a 2-year I/O period still amortizes the
+full principal over 10 years once amortization begins, per standard
+commercial lending practice.
+
+**Coverage.** `CoverageResult.DSCR` divides a numerator (`Input.CashFlow`
+if supplied, otherwise `Input.EBITDA` — see `CoverageNumeratorSource`) by
+total annual debt service, left unavailable (not zero or infinite) when
+debt service is exactly zero. `FixedChargeCoverage` follows the
+conventional formula `(numerator - CashTaxes - [UnfinancedCapex ?
+CapitalExpenditures : 0] + LeasePayments) / (AnnualDebtService +
+CurrentPortionLongTermDebt + LeasePayments)`, computed only when at least
+one `FixedChargeInputs` field is supplied. `DebtToEBITDA`/`NetDebtToEBITDA`
+are available only when EBITDA is strictly positive — a leverage multiple
+against a zero or negative EBITDA is not a meaningful ratio, mirroring
+`IssueNegativeEBITDA`'s rationale for why DSCR itself is still computed
+(and can legitimately read negative) but leverage is not.
+
+**Capacity.** `MaxDebtUnderDSCR` solves for the principal that, amortized
+at the same rate/term/frequency/interest-only structure as the first
+supplied `ProposedLoans`/`ExistingDebt` entry ("pricing terms"), produces
+annual debt service exactly equal to the coverage numerator divided by
+`Policy.MinimumDSCR` — exploiting that `FirstYearAnnualDebtService` is
+linear in principal, so the solve is a direct ratio rather than an
+iterative search. `MaxDebtUnderLeverage` is `EBITDA x
+Policy.MaximumDebtToEBITDA`, or, when `Policy.MaximumNetDebtToEBITDA` is
+also set, whichever gross-debt-equivalent figure (after adding back
+`CashAndEquivalents` to the net cap) is smaller. `CombinedMaximumDebt`
+picks the more restrictive of the two available figures and
+`LimitingConstraint` reports which one; `Headroom` is that figure minus
+the resolved current total debt balance. Every one of these calculations
+is skipped (left unavailable, with `IssueNoLenderPolicy` recorded) when
+`Input.Policy` has no non-zero threshold — this package never invents a
+default cap.
+
+**Scenarios.** `Input.DownsideScenarios` applies an
+`EBITDAHaircutPercent`/`CashFlowHaircutPercent` to the base-case earnings
+figures (a negative percentage models an upside case) while holding debt
+service, leverage, and cash fixed, then recomputes `CoverageResult` under
+the stressed figures. `ScenarioResult.BreachesMinimumDSCR` is `true` only
+when `Policy.MinimumDSCR` is set and the scenario's DSCR falls below it —
+`false` (not merely unavailable) when no policy threshold exists to
+breach.
+
+Files:
+
+- **`types.go`** — `Value`, `LoanTerms`/`AmortizationSchedule`,
+  `LenderPolicy`, `FixedChargeInputs`, `DownsideScenario`, `Input`,
+  `CoverageResult`, `MaximumCapacity`, `ScenarioResult`,
+  `IssueCode`/`IssueSeverity`/`Issue`, `HasErrors`, `FlagCode`/`Flag`,
+  `Result`, `FormulaVersion`.
+- **`amortization.go`** — `validateLoanTerms` (structural validation) and
+  `Amortize` (the level-payment formula, interest-only handling, and
+  first-year vs. steady-state debt service).
+- **`coverage.go`** — `computeCoverage`: DSCR, fixed-charge coverage,
+  interest coverage, and leverage ratio computation shared by the base
+  case, the existing-only case, and every scenario.
+- **`capacity.go`** — `computeCapacity`: the maximum-debt-under-DSCR solve,
+  the maximum-debt-under-leverage-cap calculation, and the
+  combined-capacity/headroom rule.
+- **`scenarios.go`** — `computeScenarios`: applies each
+  `DownsideScenario`'s haircuts and recomputes coverage.
+- **`debt.go`** — `Calculate(Input) Result`: top-level validation,
+  schedule construction, and orchestration of coverage/capacity/scenarios.
+- **`flags.go`** — every deterministic flag-trigger rule.
+
+See [`analytics/debt/debt_test.go`](analytics/debt/debt_test.go),
+[`analytics/debt/amortization_test.go`](analytics/debt/amortization_test.go),
+[`analytics/debt/determinism_test.go`](analytics/debt/determinism_test.go),
+and [`analytics/debt/roundtrip_test.go`](analytics/debt/roundtrip_test.go)
+for every scenario the task requires (a standard amortizing loan validated
+against a reference payment figure, zero interest, zero principal, an
+interest-only period both spanning and straddling the first year, zero
+debt, negative EBITDA, cash-flow-preferred-over-EBITDA numerator
+selection, fixed-charge coverage, the maximum-debt-under-DSCR solve
+verified by re-amortizing the solved principal, the maximum-debt-under-
+leverage-cap calculation for gross/net/combined caps, the combined-
+capacity limiting-constraint and headroom rule, downside scenarios with
+debt service held fixed and a policy-breach flag, invalid loan terms
+excluded but reported by index, and JSON/determinism) exercised against
+hand-built fixtures.
+
 ### `valuation`
 
 Implements the individual valuation methods themselves: SDE multiple,
@@ -4656,6 +4786,7 @@ persist historical valuations").
 | Anomaly detection rules | `anomalies.FormulaVersion`, echoed on `anomalies.Result.FormulaVersion` | Every `RuleCode`'s exact comparison method (spike/variance/growth-gap/margin/materiality/gap/duplicate/sign/negative-amount detection) and the `DefaultThresholds` trigger points (`analytics/anomalies`) |
 | Variance analysis formulas | `variance.FormulaVersion`, echoed on `variance.Result.FormulaVersion` | The absolute/percentage variance formulas, the favorable/unfavorable direction rules (taxonomy-category defaults, the mixed other-income-statement per-code rule, and `DirectionOverrides` precedence), the materiality test, the contribution-to-total-variance formula, the category rollup, and the period-trend formula (`analytics/variance`) |
 | Forecast/scenario formulas | `forecast.FormulaVersion`, echoed on `forecast.Result.FormulaVersion` | The historical-base derivation, the per-period compounding rule for revenue/COGS/opex (aggregate-plus-override precedence, the `FixedAmount` proportional-split rule, `OpexMethodExcludeAmount`'s one-time-item exclusion), the EBIT/EBITDA/SDE/margin/tax/net-income formulas, the working-capital and cash-flow bridge, the debt-service-coverage formula, and every `Apply*` scenario-transformation helper's exact arithmetic (`analytics/forecast`) |
+| Debt capacity/DSCR formulas | `debt.FormulaVersion`, echoed on `debt.Result.FormulaVersion` | The amortization/payment formula (including interest-only handling), the annual-debt-service aggregation, the DSCR/fixed-charge-coverage/leverage/interest-coverage formulas, the maximum-debt-under-DSCR and maximum-debt-under-leverage solvers, the combined-capacity (most-restrictive-constraint) rule, and the downside-scenario methodology (`analytics/debt`) |
 | AI request/response schema | `ai.RequestSchemaVersion`, echoed on `ai.Provenance.RequestSchemaVersion` | The `Request`/`Response` wire shape `financial/classification/ai` sends to/expects from a `Classifier` |
 | AI fallback orchestration | `ai.OrchestrationVersion`, echoed on `ai.Provenance.OrchestrationVersion` | The trigger/fallback/safety decision logic in `ClassifyWithFallback`/`ClassifyBatchWithFallback` (which `FallbackMode` runs AI when, structural-row skipping, disagreement handling) |
 | OpenAI adapter (classification) | `openai.AdapterVersion`, echoed on `ai.Provenance.AdapterVersion` | This specific provider adapter's prompt-construction/response-parsing logic (`financial/classification/ai/openai`) |
@@ -4883,6 +5014,19 @@ message strings:
   cannot identify the historical base period to project forward from at
   all without chronological order, whereas siblings merely lose a
   trend/seasonality output.
+- **`debt.Issue{Code debt.IssueCode, Severity, Message, Loan}`** —
+  `analytics/debt`'s own separate system (`NO_EBITDA`, `NEGATIVE_EBITDA`,
+  `INVALID_LOAN_TERMS`, `SUSPICIOUS_INTEREST_RATE`, `NO_DEBT`,
+  `NO_LENDER_POLICY`), for the same reason as every other `analytics/`
+  sibling above: a debt-capacity-input problem is its own problem domain.
+  Unlike its siblings, `Issue` here carries one extra optional scope field
+  — `Loan` (e.g. `"proposed_loans[1]"`) — identifying which `LoanTerms`
+  slice entry an issue applies to, since a single `Calculate` call
+  validates a list of loans independently and an invalid entry is excluded
+  from every downstream calculation rather than failing the whole `Result`.
+  `INVALID_LOAN_TERMS` is the only blocking `SeverityError`, and it is
+  scoped to just that one loan (which is dropped from
+  `ExistingSchedules`/`ProposedSchedules`), not to the whole `Result`.
 - **`ai.Issue{RowID, Code ai.IssueCode, Severity, Message}`** —
   `financial/classification/ai`'s own separate system (`AI_DISABLED`,
   `AI_PROVIDER_UNAVAILABLE`, `AI_TIMEOUT`, `AI_PROVIDER_ERROR`,
