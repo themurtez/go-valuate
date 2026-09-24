@@ -222,8 +222,10 @@ supplier — it may simply reflect large recent purchase volume, long
 negotiated terms, or payment timing. `ConcentrationSummary.Label`
 explicitly says so: this is **AP/payment exposure concentration**, not
 vendor dependency. True operational supplier dependency (single-sourced
-parts, switching cost, lead-time risk) belongs in the separate, later
-Vendor Spend Analytics module (Prompt 47).
+parts, switching cost, lead-time risk) belongs in the separate
+[Vendor Spend Analytics module](VENDOR_SPEND_ANALYTICS.md)
+(`accounting/vendorspend`), which computes its own supplier spend
+concentration from period purchase volume, not from AP balances.
 
 ## Due-date schedule
 
@@ -423,9 +425,10 @@ This package does **not** implement: vendor payment execution, ACH/check
 generation, approval workflow, procurement, purchase orders, vendor
 onboarding, fraud detection, supplier credit scoring, bank reconciliation,
 QuickBooks/Xero synchronization, future purchase forecasting, or a full
-13-week cash forecast (that is Prompt 43's separate module). True
-operational vendor-dependency/spend analytics (beyond simple AP-balance
-concentration) is Prompt 47's separate Vendor Spend Analytics module.
+13-week cash forecast (that is `accounting/cashforecast`'s separate
+module). True operational vendor-dependency/spend analytics (beyond
+simple AP-balance concentration) is
+[`accounting/vendorspend`'s](VENDOR_SPEND_ANALYTICS.md) separate module.
 
 ## Limitations
 
