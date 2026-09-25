@@ -290,6 +290,7 @@ go-valuate/
   transactions/salereadiness/ deterministic sale-readiness assessment: 11 dimension statuses from optional QoE/working-capital/concentration/revenue-quality/consensus/metrics results plus a business profile, blockers/risks/strengths/missing-information/opportunities, optional overall score
   portfolio/diagnostics/     multi-business portfolio scan: ranked findings (margin/revenue/cash/leverage/concentration/valuation/quality/sale-readiness) from condensed per-business summaries, configurable priority score, coverage/missing-data summary
   reporting/management/     presentation-neutral management-reporting data pack: KPI summary, historical/profitability/liquidity-leverage/cash-flow/working-capital series, variance/forecast tables, top-issues rollup, chart-ready series, from up to 13 optional sibling results — no PDF/HTML/chart rendering, no narrative AI
+  reporting/advisory/       Controller/CFO advisory pack: composes (never recalculates) financial/liquidity/working-capital/revenue/profitability/labor/inventory/vendor-spend/debt-covenant/accounting-close/forecast/valuation/transaction-readiness/KPI facts from up to ~25 optional sibling results into 15 fixed sections, executive summary, deduplicated/provenance-preserving action register, cross-module synthesis rules, source-precedence conflict handling, current/prior pack comparison — no PDF/HTML rendering, no narrative AI, no prescriptive business decisions (see docs/CONTROLLER_CFO_ADVISORY_PACK.md)
   valuation/                 common valuation result envelope (value types, bridge, issues)
   valuation/sde/              SDE multiple method
   valuation/ebitda/           EBITDA multiple method
@@ -6102,6 +6103,9 @@ persist historical valuations").
 | Period close checklist schema | `closechecklist.SchemaVersion`, echoed on `Result.Versions.SchemaVersion` | The `Instance`/`Template`/`SectionDefinition`/`TaskDefinition`/`TaskState`/`EvidenceRef`/`SignOff`/`GateFact`/`Exception`/`Policy`/`TaskResult`/`SectionResult`/`Blocker`/`Finding`/`Issue`/`Result` shapes (`accounting/closechecklist`); see `docs/PERIOD_CLOSE_CHECKLIST.md` |
 | Period close checklist formulas | `closechecklist.FormulaVersion`, echoed on `Result.Versions.FormulaVersion` | Applicability resolution (`applicability.go`), dependency graph/cycle handling and evaluation ordering (`dependencies.go`/`readiness.go`), due-date computation (`duedates.go`), evidence/sign-off/gate satisfaction rules (`evidence.go`/`signoff.go`/`gates.go`), exception application (`exceptions.go`), and the task/section/checklist readiness decision tables (`readiness.go`/`checklistreadiness.go`) (`accounting/closechecklist`) |
 | Period close checklist template contract version | `closechecklist.TemplateContractVersion`, echoed on `Result.Versions.TemplateContractVersion` | The `Template`/`SectionDefinition`/`TaskDefinition` shape specifically — kept separate from the schema version because externally persisted templates/close instances may outlive a given code release, independent of `Template.Version` (a caller-assigned content-revision id for one concrete template) (`accounting/closechecklist`) |
+| Advisory pack schema | `advisory.SchemaVersion`, echoed on `Result.SchemaVersion` | The `Result`/`Section`/`Metric`/`Insight`/`ActionItem`/`ExecutiveSummary`/`Snapshot`/`Coverage`/`Issue` shapes (`reporting/advisory`); see `docs/CONTROLLER_CFO_ADVISORY_PACK.md` |
+| Advisory pack composition formulas | `advisory.FormulaVersion`, echoed on `Result.FormulaVersion` | Which sibling `Result` field populates each `Metric`/`Insight` (every `section_*.go` adapter), the source-precedence/conflict-detection rule (`sourceprecedence.go`), the current/prior change formulas (`value.go`), the executive-selection and priority-rule precedence (`executive.go`/`policy.go`), the cross-module synthesis rules (`synthesis.go`), and the action-deduplication identity rule (`action.go`) (`reporting/advisory`) |
+| Advisory pack contract version | `advisory.AdvisoryContractVersion`, echoed on `Result.AdvisoryContractVersion` | The semantic meaning of every generated `StatementCode`/action-template/question-template mapping (`statements.go`, `actiontemplates.go`, `question.go`) — versioned separately from `FormulaVersion` since generated wording may be persisted/exported by a caller independent of whether the underlying composition logic changed (`reporting/advisory`) |
 
 **The rule for bumping a version:** whenever a formula, an availability/
 validation rule, a default, a sign convention, or an output shape changes
@@ -6779,6 +6783,24 @@ of AI/LLM assistance (document understanding, OCR correction, AI-invented
 replacement salaries/market rents, valuation method/multiple selection, DCF
 forecasting, report narrative generation) remains explicitly out of scope —
 see each section's own "Explicit non-goals" for the full list.
+
+## Accounting-operations/advisory roadmap completion
+
+Beyond the V1 valuation core described above, this repository grew a
+second, parallel roadmap of deterministic accounting-operations and
+advisory packages: `accounting/ledger`, `accounting/statements`,
+`accounting/ar`, `accounting/ap`, `accounting/journaldiagnostics`,
+`accounting/closequality`, `accounting/cashforecast`, `accounting/labor`,
+`accounting/inventory`, `accounting/profitability`,
+`accounting/vendorspend`, `accounting/reconciliation`,
+`accounting/closechecklist`, `analytics/kpi`, and finally
+[`reporting/advisory`](docs/CONTROLLER_CFO_ADVISORY_PACK.md) — a
+Controller/CFO advisory pack composer that consolidates every one of the
+above (plus the original valuation-core analytics packages) into a
+single, deterministic, presentation-neutral advisory `Result`, with no
+new accounting/valuation formula of its own. `reporting/advisory` is the
+final module in this roadmap; see its own doc for the full section/
+adapter/synthesis/action-register model.
 
 ## V1 integration readiness
 
